@@ -21,26 +21,58 @@
 #include "iso-sm-internal.h"
 #include "libopensc/internal.h"
 #include "libopensc/pace.h"
+#include "libopensc/sm.h"
 #include "card-npa.h"
 #include <npa/boxing.h>
 #include <npa/npa.h>
+#include <npa/scutil.h>
 #include <string.h>
 
-#ifndef HAVE_SC_APDU_GET_OCTETS
-#include "libopensc/card.c"
-#endif
-
 struct npa_drv_data {
-    unsigned char *can;
-    size_t can_length;
+    const char *can;
+    unsigned char *st_dv_certificate;
+    size_t st_dv_certificate_len;
+    unsigned char *st_certificate;
+    size_t st_certificate_len;
+    unsigned char *st_key;
+    size_t st_key_len;
     unsigned char *ef_cardaccess;
     size_t ef_cardaccess_length;
+    unsigned char *ef_cardsecurity;
+    size_t ef_cardsecurity_length;
 };
 
+static struct npa_drv_data *npa_drv_data_create(void)
+{
+    struct npa_drv_data *drv_data = calloc(1, sizeof *drv_data);
+    return drv_data;
+}
+
+static void npa_drv_data_free(struct npa_drv_data *drv_data)
+{
+    if (drv_data) {
+        free(drv_data->ef_cardaccess);
+        free(drv_data->ef_cardsecurity);
+        free(drv_data->st_certificate);
+        free(drv_data->st_dv_certificate);
+        free(drv_data->st_key);
+        free(drv_data);
+    }
+}
+
 static struct sc_atr_table npa_atrs[] = {
-    {"3B:8A:80:01:80:31:F8:73:F7:41:E0:82:90:00:75", NULL, "German ID card (neuer Personalausweis, nPA)", SC_CARD_TYPE_NPA, 0, NULL},
-    {"3B:84:80:01:00:00:90:00:95", NULL, "German ID card (Test neuer Personalausweis)", SC_CARD_TYPE_NPA_TEST, 0, NULL},
-    {"3B:88:80:01:00:E1:F3:5E:13:77:83:00:00", "FF:FF:FF:FF:00:FF:FF:FF:FF:FF:FF:FF:00", "German ID card (Test Online-Ausweisfunktion)", SC_CARD_TYPE_NPA_ONLINE, 0, NULL},
+    {"3B:8A:80:01:80:31:F8:73:F7:41:E0:82:90:00:75",
+        "FF:FF:FF:FF:FF:FF:00:FF:00:00:FF:FF:FF:FF:00",
+        "German ID card (neuer Personalausweis, nPA)", SC_CARD_TYPE_NPA, 0, NULL},
+    {"3B:88:80:01:00:00:00:00:00:00:00:00:09", NULL,
+        "German ID card (neuer Personalausweis, nPA)", SC_CARD_TYPE_NPA, 0, NULL},
+    {"3B:87:80:01:80:31:B8:73:84:01:E0:19", NULL,
+        "German ID card (neuer Personalausweis, nPA)", SC_CARD_TYPE_NPA, 0, NULL},
+    {"3B:84:80:01:00:00:90:00:95", NULL,
+        "German ID card (Test neuer Personalausweis)", SC_CARD_TYPE_NPA_TEST, 0, NULL},
+    {"3B:88:80:01:00:E1:F3:5E:13:77:83:00:00",
+        "FF:FF:FF:FF:00:FF:FF:FF:FF:FF:FF:FF:00",
+        "German ID card (Test Online-Ausweisfunktion)", SC_CARD_TYPE_NPA_ONLINE, 0, NULL},
     {NULL, NULL, NULL, 0, 0, NULL}
 };
 
@@ -52,6 +84,64 @@ static struct sc_card_driver npa_drv = {
     NULL, 0, NULL
 };
 
+static int npa_load_options(sc_context_t *ctx, struct npa_drv_data *drv_data)
+{
+    int r;
+    size_t i, j;
+    scconf_block **found_blocks, *block;
+    const char *file;
+
+    if (!ctx || !drv_data || !ctx->conf_blocks) {
+        r = SC_ERROR_INTERNAL;
+        goto err;
+    }
+
+    for (i = 0; ctx->conf_blocks[i]; i++) {
+        found_blocks = scconf_find_blocks(ctx->conf, ctx->conf_blocks[i],
+                    "card_driver", "npa");
+        if (!found_blocks)
+            continue;
+
+        for (j = 0, block = found_blocks[j]; block; j++, block = found_blocks[j]) {
+            if (!drv_data->can)
+                drv_data->can = scconf_get_str(block, "can", NULL);
+
+            if (!drv_data->st_dv_certificate
+                    || !drv_data->st_dv_certificate_len) {
+                file = scconf_get_str(block, "st_dv_certificate", NULL);
+                if (!fread_to_eof(file,
+                            (unsigned char **) &drv_data->st_dv_certificate,
+                            &drv_data->st_dv_certificate_len))
+                    sc_log(ctx, "Waring: Could not read %s.\n", file);
+            }
+
+            if (!drv_data->st_certificate
+                    || !drv_data->st_certificate_len) {
+                file = scconf_get_str(block, "st_certificate", NULL);
+                if (!fread_to_eof(file,
+                            (unsigned char **) &drv_data->st_certificate,
+                            &drv_data->st_certificate_len))
+                    sc_log(ctx, "Waring: Could not read %s.\n", file);
+            }
+
+            if (!drv_data->st_key
+                    || !drv_data->st_key_len) {
+                file = scconf_get_str(block, "st_key", NULL);
+                if (!fread_to_eof(file,
+                            (unsigned char **) &drv_data->st_key,
+                            &drv_data->st_key_len))
+                    sc_log(ctx, "Waring: Could not read %s.\n", file);
+            }
+        }
+        
+        free(found_blocks);
+    }
+    r = SC_SUCCESS;
+
+err:
+    return r;
+}
+
 static int npa_match_card(sc_card_t * card)
 {
     if (_sc_match_atr(card, npa_atrs, &card->type) < 0)
@@ -59,45 +149,266 @@ static int npa_match_card(sc_card_t * card)
     return 1;
 }
 
-static int npa_init(sc_card_t * card)
+static void npa_get_cached_pace_params(sc_card_t *card,
+        struct establish_pace_channel_input *pace_input,
+        struct establish_pace_channel_output *pace_output)
 {
     struct npa_drv_data *drv_data;
 
-    if (card) {
-        drv_data = calloc(1, sizeof *drv_data);
-        card->drv_data = drv_data;
-        if (drv_data) {
-            drv_data->can = NULL;
-            drv_data->can_length = 0;
-            drv_data->ef_cardaccess = NULL;
-            drv_data->ef_cardaccess_length = 0;
+    if (card->drv_data) {
+        drv_data = card->drv_data;
+        
+        if (pace_output) {
+            pace_output->ef_cardaccess = drv_data->ef_cardaccess;
+            pace_output->ef_cardaccess_length = drv_data->ef_cardaccess_length;
         }
 
-        card->caps |= SC_CARD_CAP_APDU_EXT | SC_CARD_CAP_RNG;
-        memset(&card->sm_ctx, 0, sizeof card->sm_ctx);
-#ifdef DISABLE_GLOBAL_BOXING_INITIALIZATION
-        sc_detect_boxing_cmds(card->reader);
-#endif
+        if (pace_input && pace_input->pin_id == PACE_PIN_ID_CAN) {
+            pace_input->pin = (const unsigned char *) drv_data->can;
+            pace_input->pin_length = drv_data->can ? strlen(drv_data->can) : 0;
+        }
+    }
+}
+
+static void npa_get_cached_ta_params(sc_card_t *card,
+    const unsigned char *certs[2], size_t certs_lens[2],
+    const unsigned char **st_key, size_t *st_key_len)
+{
+    struct npa_drv_data *drv_data;
+    size_t i;
+
+    if (card->drv_data) {
+        drv_data = card->drv_data;
+
+        if (certs && certs_lens) {
+            i = 0;
+            if (drv_data->st_dv_certificate) {
+                certs[i] = drv_data->st_dv_certificate;
+                certs_lens[i] = drv_data->st_dv_certificate_len;
+                i++;
+            }
+            if (drv_data->st_certificate) {
+                certs[i] = drv_data->st_certificate;
+                certs_lens[i] = drv_data->st_certificate_len;
+            }
+        }
+        if (st_key && st_key_len) {
+            *st_key = drv_data->st_key;
+            *st_key_len = drv_data->st_key_len;
+        }
+    }
+}
+
+static void npa_get_cached_ca_params(sc_card_t *card,
+    unsigned char **ef_cardsecurity, size_t *ef_cardsecurity_length)
+{
+    struct npa_drv_data *drv_data;
+
+    if (card->drv_data) {
+        drv_data = card->drv_data;
+
+        if (ef_cardsecurity && ef_cardsecurity_length) {
+            *ef_cardsecurity = drv_data->ef_cardsecurity;
+            *ef_cardsecurity_length = drv_data->ef_cardsecurity_length;
+        }
+    }
+}
+
+static void npa_cache_or_free(sc_card_t *card,
+        unsigned char **ef_cardaccess, size_t *ef_cardaccess_length,
+        unsigned char **ef_cardsecurity, size_t *ef_cardsecurity_length)
+{
+    struct npa_drv_data *drv_data;
+
+    if (card && card->drv_data) {
+        drv_data = card->drv_data;
+
+        if (ef_cardaccess && ef_cardaccess_length
+                && *ef_cardaccess && *ef_cardaccess_length) {
+            drv_data->ef_cardaccess = *ef_cardaccess;
+            drv_data->ef_cardaccess_length = *ef_cardaccess_length;
+            *ef_cardaccess = NULL;
+            *ef_cardaccess_length = 0;
+        }
+        if (ef_cardsecurity && ef_cardsecurity_length
+                && *ef_cardsecurity && *ef_cardsecurity_length) {
+            drv_data->ef_cardsecurity = *ef_cardsecurity;
+            drv_data->ef_cardsecurity_length = *ef_cardsecurity_length;
+            *ef_cardsecurity = NULL;
+            *ef_cardsecurity_length = 0;
+        }
+    } else {
+        if (ef_cardaccess && ef_cardaccess_length) {
+            free(*ef_cardaccess);
+            *ef_cardaccess = NULL;
+            *ef_cardaccess_length = 0;
+        }
+        if (ef_cardsecurity && ef_cardsecurity_length) {
+            free(*ef_cardsecurity);
+            *ef_cardsecurity = NULL;
+            *ef_cardsecurity_length = 0;
+        }
+    }
+}
+
+static int npa_unlock_esign(sc_card_t *card)
+{
+    int r = SC_ERROR_INTERNAL;
+    struct establish_pace_channel_input pace_input;
+    struct establish_pace_channel_output pace_output;
+    const unsigned char *certs[] = { NULL, NULL };
+    size_t certs_lens[] = { 0, 0};
+    const unsigned char *st_key = NULL;
+    size_t st_key_len = 0;
+    unsigned char *ef_cardsecurity = NULL;
+    size_t ef_cardsecurity_len = 0;
+    memset(&pace_input, 0, sizeof pace_input);
+    memset(&pace_output, 0, sizeof pace_output);
+
+    if (!card) {
+        r = SC_ERROR_INVALID_CARD;
+        goto err;
     }
 
-    return SC_SUCCESS;
+    sc_log(card->ctx, "Will verify CAN first for unlocking eSign application.\n");
+    pace_input.chat = esign_chat;
+    pace_input.chat_length = sizeof esign_chat;
+    pace_input.pin_id = PACE_PIN_ID_CAN;
+    npa_get_cached_pace_params(card, &pace_input, &pace_output);
+    npa_get_cached_ta_params(card, certs, certs_lens, &st_key, &st_key_len);
+    npa_get_cached_ca_params(card, &ef_cardsecurity, &ef_cardsecurity_len);
+
+    if (!(card->reader && (card->reader->capabilities & SC_READER_CAP_PACE_ESIGN))
+            && (!st_key || !st_key_len)) {
+        sc_log(card->ctx, "QES requires a comfort reader (CAT-K) or a ST certificate.\n");
+        r = SC_ERROR_NOT_SUPPORTED;
+        goto err;
+    }
+
+    /* FIXME set flags with opensc.conf */
+    npa_default_flags |= NPA_FLAG_DISABLE_CHECK_ALL;
+    npa_default_flags |= NPA_FLAG_DISABLE_CHECK_TA;
+    npa_default_flags |= NPA_FLAG_DISABLE_CHECK_CA;
+
+    /* FIXME show an alert to the user if can == NULL */
+    r = perform_pace(card, pace_input, &pace_output, EAC_TR_VERSION_2_02);
+    if (SC_SUCCESS != r) {
+        sc_log(card->ctx, "Error verifying CAN.\n");
+        goto err;
+    }
+
+    if (card->reader->capabilities & SC_READER_CAP_PACE_ESIGN) {
+        sc_log(card->ctx, "Proved Access rights to eSign application with comfort reader (CAT-K).\n");
+    } else {
+        r = perform_terminal_authentication(card, certs, certs_lens, st_key,
+                st_key_len, NULL, 0);
+        if (r != SC_SUCCESS) {
+            sc_log(card->ctx, "Error authenticating as signature terminal.\n");
+            goto err;
+        }
+        r = perform_chip_authentication(card, &ef_cardsecurity, &ef_cardsecurity_len);
+        if ( SC_SUCCESS != r) {
+            sc_log(card->ctx, "Error verifying the chips authenticy.\n");
+        }
+
+        sc_log(card->ctx, "Proved Access rights to eSign application with configured key as ST.\n");
+    }
+
+err:
+    npa_cache_or_free(card, &pace_output.ef_cardaccess,
+            &pace_output.ef_cardaccess_length,
+            &ef_cardsecurity, &ef_cardsecurity_len);
+    free(pace_output.recent_car);
+    free(pace_output.previous_car);
+    free(pace_output.id_icc);
+    free(pace_output.id_pcd);
+
+    return r;
+}
+
+static int npa_init(sc_card_t * card)
+{
+    int flags = SC_ALGORITHM_ECDSA_RAW;
+    int ext_flags = 0;
+    int r;
+
+    if (!card) {
+        r = SC_ERROR_INVALID_CARD;
+        goto err;
+    }
+
+    card->caps |= SC_CARD_CAP_APDU_EXT | SC_CARD_CAP_RNG;
+    card->max_recv_size = 0xFFFF+1;
+    card->max_send_size = 0xFFFF;
+    memset(&card->sm_ctx, 0, sizeof card->sm_ctx);
+
+    r = _sc_card_add_ec_alg(card, 192, flags, ext_flags, NULL);
+    if (r != SC_SUCCESS)
+        goto err;
+    r = _sc_card_add_ec_alg(card, 224, flags, ext_flags, NULL);
+    if (r != SC_SUCCESS)
+        goto err;
+    r = _sc_card_add_ec_alg(card, 256, flags, ext_flags, NULL);
+    if (r != SC_SUCCESS)
+        goto err;
+    /* nPA does not encode the proprietary fieldSize in PrivateECKeyAttributes,
+     * which leaves it at 0 for OpenSC, so we need to add 0x00 as supported
+     * field_length */
+    r = _sc_card_add_ec_alg(card, 0, flags, ext_flags, NULL);
+    if (r != SC_SUCCESS)
+        goto err;
+
+#ifdef DISABLE_GLOBAL_BOXING_INITIALIZATION
+    sc_detect_boxing_cmds(card->reader);
+#endif
+
+    EAC_init();
+    card->drv_data = npa_drv_data_create();
+    r = npa_load_options(card->ctx, card->drv_data);
+    if (r != SC_SUCCESS)
+        goto err;
+
+    /* unlock the eSign application for reading the certificates
+     * by the PKCS#15 layer (i.e. sc_pkcs15_bind_internal) */
+    r = npa_unlock_esign(card);
+
+err:
+    return r;
 }
 
 static int npa_finish(sc_card_t * card)
 {
-    struct npa_drv_data *drv_data;
-
-    if (card) {
-        drv_data = card->drv_data;
-        if (drv_data) {
-            free(drv_data->ef_cardaccess);
-            free(drv_data->can);
-            free(drv_data);
-        }
-        card->drv_data = NULL;
-    }
+    sc_sm_stop(card);
+    npa_drv_data_free(card->drv_data);
+    card->drv_data = NULL;
+    EAC_cleanup();
 
     return SC_SUCCESS;
+}
+
+static int npa_set_security_env(struct sc_card *card,
+        const struct sc_security_env *env, int se_num)
+{
+    int r;
+    struct sc_card_driver *iso_drv;
+    struct sc_security_env fixed_env;
+
+    iso_drv = sc_get_iso7816_driver();
+
+    if (!env || !iso_drv || !iso_drv->ops || !iso_drv->ops->set_security_env) {
+        r = SC_ERROR_INTERNAL;
+    } else {
+        memcpy(&fixed_env, env, sizeof fixed_env);
+        if (env->operation == SC_SEC_OPERATION_SIGN) {
+            /* The pkcs#15 layer assumes that the field_size of the private key
+             * object is correctly initialized and wants to include it as
+             * algorithm reference. We disable it here */
+            fixed_env.flags &= ~SC_SEC_ENV_ALG_REF_PRESENT;
+        }
+        r = iso_drv->ops->set_security_env(card, &fixed_env, se_num);
+    }
+
+    return r;
 }
 
 static int npa_pin_cmd_get_info(struct sc_card *card,
@@ -160,9 +471,7 @@ static int npa_pace_verify(struct sc_card *card,
         pace_input.pin = pin->data;
         pace_input.pin_length = pin->len;
     }
-    npa_get_cache(card, pace_input.pin_id, &pace_input.pin,
-            &pace_input.pin_length, &pace_output.ef_cardaccess,
-            &pace_output.ef_cardaccess_length);
+    npa_get_cached_pace_params(card, &pace_input, &pace_output);
 
     r = perform_pace(card, pace_input, &pace_output, EAC_TR_VERSION_2_02);
 
@@ -188,8 +497,6 @@ static int npa_pace_verify(struct sc_card *card,
         pace_input.pin_id = PACE_PIN_ID_CAN;
         pace_input.pin = NULL;
         pace_input.pin_length = 0;
-        npa_get_cache(card, pace_input.pin_id, &pace_input.pin,
-                &pace_input.pin_length, NULL, NULL);
 
         r = perform_pace(card, pace_input, &pace_output, EAC_TR_VERSION_2_02);
 
@@ -230,11 +537,8 @@ static int npa_pace_verify(struct sc_card *card,
        }
     }
 
-    npa_set_cache(card, pace_input.pin_id, pace_input.pin,
-            pace_input.pin_length, pace_output.ef_cardaccess,
-            pace_output.ef_cardaccess_length);
-
-    free(pace_output.ef_cardaccess);
+    npa_cache_or_free(card, &pace_output.ef_cardaccess,
+            &pace_output.ef_cardaccess_length, NULL, NULL);
     free(pace_output.recent_car);
     free(pace_output.previous_car);
     free(pace_output.id_icc);
@@ -316,26 +620,16 @@ static int npa_pin_cmd(struct sc_card *card,
                         goto err;
                     break;
 
-                case NPA_PIN_ID_ESIGN_PIN:
-                    if (card->reader->capabilities & SC_READER_CAP_PACE_ESIGN) {
-                        sc_log(card->ctx, "Found a comfort reader (CAT-K).\n");
-                        sc_log(card->ctx, "Will verify cached CAN first.\n");
-                        r = npa_pace_verify(card, PACE_PIN_ID_CAN, NULL,
-                                esign_chat, sizeof esign_chat, tries_left);
-                        if (r != SC_SUCCESS)
-                            goto err;
-                    } else {
-                        sc_log(card->ctx, "No comfort reader (CAT-K) found.\n");
-                        sc_log(card->ctx, "I hope you have already performed EAC as ST...\n");
-                    }
+                default:
+                    /* assuming QES PIN */
+
+                    /* We assume that the eSign application has already been
+                     * unlocked, see npa_init().
+                     *
+                     * Now, verify the QES PIN. */
                     r = npa_standard_pin_cmd(card, data, tries_left);
                     if (r != SC_SUCCESS)
                         goto err;
-                    break;
-
-                default:
-                    r = SC_ERROR_OBJECT_NOT_FOUND;
-                    goto err;
                     break;
             }
 
@@ -358,7 +652,25 @@ err:
     SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
 }
 
-static struct sc_card_driver *npa_get_driver(void)
+static int npa_logout(sc_card_t *card)
+{
+    struct sc_apdu apdu;
+
+    sc_sm_stop(card);
+
+    if (card->reader->capabilities & SC_READER_CAP_PACE_GENERIC) {
+        /* If PACE is done between reader and card, SM is transparent to us as
+         * it ends at the reader. With CLA=0x0C we provoque a SM error to
+         * disable SM on the reader. */
+        sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0xA4, 0x00, 0x00);
+        apdu.cla = 0x0C;
+        sc_transmit_apdu(card, &apdu);
+        /* ignore result */
+    }
+    return sc_select_file(card, sc_get_mf_path(), NULL);
+}
+
+struct sc_card_driver *npa_get_driver(void)
 {
     struct sc_card_driver *iso_drv = sc_get_iso7816_driver();
 
@@ -366,7 +678,9 @@ static struct sc_card_driver *npa_get_driver(void)
     npa_ops.match_card = npa_match_card;
     npa_ops.init = npa_init;
     npa_ops.finish = npa_finish;
+    npa_ops.set_security_env = npa_set_security_env;
     npa_ops.pin_cmd = npa_pin_cmd;
+    npa_ops.logout = npa_logout;
 
     return &npa_drv;
 }
@@ -387,52 +701,4 @@ const char *sc_driver_version(void)
      * our version info against OpenSC's PACKAGE_VERSION. For this reason we
      * tell OpenSC that everything is fine, here. */
     return sc_get_version();
-}
-
-void npa_get_cache(struct sc_card *card,
-        unsigned char pin_id, const unsigned char **pin, size_t *pin_length,
-        unsigned char **ef_cardaccess, size_t *ef_cardaccess_length)
-{
-    struct npa_drv_data *drv_data;
-	if (card && card->drv_data) {
-		drv_data = card->drv_data;
-        if (pin_id == PACE_PIN_ID_CAN && pin && pin_length && !*pin) {
-            /* set CAN if *pin is NULL */
-            *pin = drv_data->can;
-            *pin_length = drv_data->can_length;
-			sc_log(card->ctx, "Using the cached CAN\n");
-        }
-        if (ef_cardaccess && ef_cardaccess_length && !*ef_cardaccess) {
-            /* set EF.CardAccess if *ef_cardaccess is NULL */
-            *ef_cardaccess = drv_data->ef_cardaccess;
-            *ef_cardaccess_length = drv_data->ef_cardaccess_length;
-        }
-	}
-}
-
-void npa_set_cache(struct sc_card *card,
-        unsigned char pin_id, const unsigned char *pin, size_t pin_length,
-        const unsigned char *ef_cardaccess, size_t ef_cardaccess_length)
-{
-    unsigned char *p;
-    struct npa_drv_data *drv_data;
-    if (card && card->drv_data) {
-        drv_data = card->drv_data;
-        if (pin_id == PACE_PIN_ID_CAN && pin) {
-            p = realloc(drv_data->can, pin_length);
-            if (p) {
-                memcpy(p, pin, pin_length);
-                drv_data->can = p;
-                drv_data->can_length = pin_length;
-            }
-        }
-        if (ef_cardaccess) {
-            p = realloc(drv_data->ef_cardaccess, ef_cardaccess_length);
-            if (p) {
-                memcpy(p, ef_cardaccess, ef_cardaccess_length);
-                drv_data->ef_cardaccess = p;
-                drv_data->ef_cardaccess_length = ef_cardaccess_length;
-            }
-        }
-    }
 }

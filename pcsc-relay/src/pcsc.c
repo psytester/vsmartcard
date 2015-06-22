@@ -116,8 +116,13 @@ static int pcsc_connect(driver_data_t **driver_data)
         }
     }
     if (readerslen <= 0) {
-        RELAY_ERROR("Could not find reader number %u\n", readernum);
-        r = SCARD_E_UNKNOWN_READER;
+        if (readernum == READERNUM_AUTODETECT) {
+            RELAY_ERROR("Could not find a reader with a card\n");
+            r = SCARD_E_NO_SMARTCARD;
+        } else {
+            RELAY_ERROR("Could not find reader number %u\n", readernum);
+            r = SCARD_E_UNKNOWN_READER;
+        }
         goto err;
     }
 
@@ -128,7 +133,7 @@ static int pcsc_connect(driver_data_t **driver_data)
         RELAY_ERROR("Could not connect to %s\n", reader);
         goto err;
     }
-    INFO("Connected to reader %u: %s\n", i, reader);
+    INFO("Connected to reader %zu: %s\n", i, reader);
     hexdump("Card's ATR: ", state.rgbAtr, state.cbAtr);
 
 err:

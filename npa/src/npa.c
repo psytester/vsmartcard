@@ -300,9 +300,11 @@ npa_sm_ctx_create(EAC_CTX *ctx, const unsigned char *certificate_description,
     } else
         out->certificate_description = NULL;
 
-    out->id_icc = BUF_MEM_create_init(id_icc, id_icc_length);
-    if (!out->id_icc)
-        goto err;
+    if (id_icc && id_icc_length) {
+        out->id_icc = BUF_MEM_create_init(id_icc, id_icc_length);
+        if (!out->id_icc)
+            goto err;
+    }
 
     out->eph_pub_key = NULL;
     out->auxiliary_data = NULL;
@@ -327,7 +329,7 @@ npa_sm_start(sc_card_t *card, EAC_CTX *eac_ctx,
         const unsigned char *id_icc, size_t id_icc_length)
 {
     int r;
-    struct iso_sm_ctx *sctx;
+    struct iso_sm_ctx *sctx = NULL;
 
     if (!eac_ctx || !eac_ctx->key_ctx) {
         r = SC_ERROR_INVALID_ARGUMENTS;
@@ -1254,7 +1256,8 @@ int perform_pace(sc_card_t *card,
         eac_ctx = EAC_CTX_new();
         if (!eac_ctx
                 || !EAC_CTX_init_ef_cardaccess(pace_output->ef_cardaccess,
-                    pace_output->ef_cardaccess_length, eac_ctx)) {
+                    pace_output->ef_cardaccess_length, eac_ctx)
+                || !eac_ctx->pace_ctx) {
             sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not parse EF.CardAccess.");
             ssl_error(card->ctx);
             r = SC_ERROR_INTERNAL;
@@ -1579,20 +1582,61 @@ int perform_terminal_authentication(sc_card_t *card,
 {
     int r;
     const unsigned char *cert = NULL;
-    size_t cert_len = 0;
+    size_t cert_len = 0, ef_cardaccess_length = 0;
     CVC_CERT *cvc_cert = NULL;
     BUF_MEM *nonce = NULL, *signature = NULL;
+    struct iso_sm_ctx *isosmctx = NULL;
+    struct npa_sm_ctx *eacsmctx = NULL;
+    unsigned char *ef_cardaccess = NULL;
+    EAC_CTX *eac_ctx = NULL;
 
-    if (!card || !card->sm_ctx.info.cmd_data || !certs_lens || !certs) {
+    if (!card || !certs_lens || !certs) {
         r = SC_ERROR_INVALID_ARGUMENTS;
         goto err;
     }
-    struct iso_sm_ctx *isosmctx = card->sm_ctx.info.cmd_data;
+    if (!card->sm_ctx.info.cmd_data) {
+        card->sm_ctx.info.cmd_data = iso_sm_ctx_create();
+    }
+    if (!card->sm_ctx.info.cmd_data) {
+        r = SC_ERROR_INTERNAL;
+        goto err;
+    }
+
+    isosmctx = card->sm_ctx.info.cmd_data;
     if (!isosmctx->priv_data) {
-        r = SC_ERROR_INVALID_ARGUMENTS;
-        goto err;
+        r = get_ef_card_access(card, &ef_cardaccess, &ef_cardaccess_length);
+        if (r < 0) {
+            sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not get EF.CardAccess.");
+            goto err;
+        }
+
+        bin_log(card->ctx, SC_LOG_DEBUG_NORMAL, "EF.CardAccess", ef_cardaccess,
+                ef_cardaccess_length);
+
+        /* XXX Card capabilities should be determined by the OpenSC card driver. We
+         * set it here to be able to use the nPA without patching OpenSC. By
+         * now we have read the EF.CardAccess so the assumption to have an nPA
+         * seems valid. */
+        card->caps |= SC_CARD_CAP_APDU_EXT;
+
+        eac_ctx = EAC_CTX_new();
+        if (!eac_ctx
+                || !EAC_CTX_init_ef_cardaccess(ef_cardaccess,
+                    ef_cardaccess_length, eac_ctx)) {
+            sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not parse EF.CardAccess.");
+            ssl_error(card->ctx);
+            r = SC_ERROR_INTERNAL;
+            goto err;
+        }
+
+        isosmctx->priv_data = npa_sm_ctx_create(eac_ctx, NULL, 0, NULL, 0);
+        if (!isosmctx->priv_data) {
+            r = SC_ERROR_INTERNAL;
+            goto err;
+        }
+        eac_ctx = NULL;
     }
-    struct npa_sm_ctx *eacsmctx = isosmctx->priv_data;
+    eacsmctx = isosmctx->priv_data;
 
 
     while (*certs && *certs_lens) {
@@ -1691,10 +1735,15 @@ int perform_terminal_authentication(sc_card_t *card,
 err:
     if (cvc_cert)
         CVC_CERT_free(cvc_cert);
+    free(ef_cardaccess);
+    EAC_CTX_clear_free(eac_ctx);
     BUF_MEM_clear_free(nonce);
     BUF_MEM_clear_free(signature);
 
-    SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+    if (card)
+        SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+    else
+        return r;
 }
 
 static int npa_mse_set_at_ca(sc_card_t *card, int protocol)
@@ -1797,15 +1846,15 @@ static int get_ef_card_security(sc_card_t *card,
     return read_binary_rec(card, SFID_EF_CARDSECURITY, ef_security, length_ef_security);
 }
 
-int perform_chip_authentication(sc_card_t *card)
+int perform_chip_authentication(sc_card_t *card,
+        unsigned char **ef_cardsecurity, size_t *ef_cardsecurity_len)
 {
     int r;
     BUF_MEM *picc_pubkey = NULL, *nonce = NULL, *token = NULL,
             *eph_pub_key = NULL;
-    unsigned char *ef_cardsecurity = NULL;
-    size_t ef_cardsecurity_len;
 
-    if (!card || !card->sm_ctx.info.cmd_data) {
+    if (!card || !card->sm_ctx.info.cmd_data
+            || !ef_cardsecurity || !ef_cardsecurity_len) {
         r = SC_ERROR_INVALID_ARGUMENTS;
         goto err;
     }
@@ -1818,12 +1867,14 @@ int perform_chip_authentication(sc_card_t *card)
 
 
     /* Passive Authentication */
-    r = get_ef_card_security(card, &ef_cardsecurity, &ef_cardsecurity_len);
-    if (r < 0) {
-        sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not get EF.CardSecurity.");
-        goto err;
+    if (!*ef_cardsecurity && !*ef_cardsecurity_len) {
+        r = get_ef_card_security(card, ef_cardsecurity, ef_cardsecurity_len);
+        if (r < 0 || !ef_cardsecurity || !ef_cardsecurity_len) {
+            sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not get EF.CardSecurity.");
+            goto err;
+        }
     }
-    picc_pubkey = CA_get_pubkey(eacsmctx->ctx, ef_cardsecurity, ef_cardsecurity_len);
+    picc_pubkey = CA_get_pubkey(eacsmctx->ctx, *ef_cardsecurity, *ef_cardsecurity_len);
     if (!picc_pubkey) {
         sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Could not verify EF.CardSecurity.");
         ssl_error(card->ctx);
@@ -1879,16 +1930,15 @@ int perform_chip_authentication(sc_card_t *card)
     }
 
 err:
-    if (ef_cardsecurity) {
-        OPENSSL_cleanse(ef_cardsecurity, ef_cardsecurity_len);
-        free(ef_cardsecurity);
-    }
     BUF_MEM_clear_free(picc_pubkey);
     BUF_MEM_clear_free(nonce);
     BUF_MEM_clear_free(token);
     BUF_MEM_clear_free(eph_pub_key);
 
-    SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+    if (card)
+        SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
+    else
+        return r;
 }
 
 static const char *MRZ_name = "MRZ";

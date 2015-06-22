@@ -23,14 +23,11 @@ from virtualsmartcard.SmartcardFilesystem import make_property
 from virtualsmartcard.utils import C_APDU, R_APDU, hexdump, inttostring
 from virtualsmartcard.CardGenerator import CardGenerator
 
-import socket, struct, sys, signal, atexit, smartcard, logging
+import socket, struct, sys, signal, atexit, logging
 
 
 class SmartcardOS(object): 
     """Base class for a smart card OS"""
-
-    mf  = make_property("mf",  "master file")
-    SAM = make_property("SAM", "secure access module")
 
     def getATR(self):
         """Returns the ATR of the card as string of characters"""
@@ -38,7 +35,6 @@ class SmartcardOS(object):
         
     def powerUp(self):
         """Powers up the card"""
-        self.mf.current = self.mf
         pass
 
     def powerDown(self):
@@ -47,7 +43,6 @@ class SmartcardOS(object):
 
     def reset(self):
         """Performs a warm reset of the card (no power down)"""
-        self.mf.current = self.mf
         pass
 
     def execute(self, msg):
@@ -59,6 +54,10 @@ class SmartcardOS(object):
 
 
 class Iso7816OS(SmartcardOS):  
+
+    mf  = make_property("mf",  "master file")
+    SAM = make_property("SAM", "secure access module")
+
     def __init__(self, mf, sam, ins2handler=None, extended_length=False):
         self.mf = mf
         self.SAM = sam
@@ -242,7 +241,10 @@ class Iso7816OS(SmartcardOS):
             if le > len(data):
                 sw = SW["WARN_EOFBEFORENEREAD"]
 
-        result = data[:le]
+        if le != None:
+            result = data[:le]
+        else:
+            result = data[:0]
         if sm:
             sw, result = self.SAM.protect_result(sw, result)
 
@@ -346,264 +348,11 @@ class Iso7816OS(SmartcardOS):
 
         return answer
 
-
-class CryptoflexOS(Iso7816OS):  
-    def __init__(self, mf, sam, ins2handler=None, maxle=MAX_SHORT_LE):
-        Iso7816OS.__init__(self, mf, sam, ins2handler, maxle)
-        self.atr = '\x3B\xE2\x00\x00\x40\x20\x49\x06'
-
-    def execute(self, msg):
-        def notImplemented(*argz, **args):
-            raise SwError(SW["ERR_INSNOTSUPPORTED"])
-
-        try:
-            c = C_APDU(msg)
-        except ValueError as e:
-            logging.debug("Failed to parse APDU %s", msg)
-            return self.formatResult(False, 0, 0, "", SW["ERR_INCORRECTPARAMETERS"])
-
-        try:
-            sw, result = self.ins2handler.get(c.ins, notImplemented)(c.p1, c.p2, c.data)
-            #print type(result)
-        except SwError as e:
-            logging.info(e.message)
-            #traceback.print_exception(*sys.exc_info())
-            sw = e.sw
-            result = ""
-
-        r = self.formatResult(c.ins, c.le, result, sw)
-        return r
-
-    def formatResult(self, ins, le, data, sw):
-        if le == 0 and len(data):
-            # cryptoflex does not inpterpret le==0 as maxle
-            self.lastCommandSW = sw
-            self.lastCommandOffcut = data
-            r = R_APDU(inttostring(SW["ERR_WRONGLENGTH"] +\
-                    min(0xff, len(data)))).render()
-        else:
-            if ins == 0xa4 and len(data):
-                # get response should be followed by select file
-                self.lastCommandSW = sw
-                self.lastCommandOffcut = data
-                r = R_APDU(inttostring(SW["NORMAL_REST"] +\
-                    min(0xff, len(data)))).render()
-            else:
-                r = Iso7816OS.formatResult(self, Iso7816OS.seekable(ins), le, data, sw, False)
-
-        return r
-
-
-class RelayOS(SmartcardOS):
-    """
-    This class implements relaying of a (physical) smartcard. The RelayOS
-    forwards the command APDUs received from the vpcd to the real smartcard via
-    an actual smart card reader and sends the responses back to the vpcd.
-    This class can be used to implement relay or MitM attacks.
-    """
-    def __init__(self, readernum):
-        """
-        Initialize the connection to the (physical) smart card via a given reader
-        """
-
-        # See which readers are available
-        readers = smartcard.System.listReaders()
-        if len(readers) <= readernum:
-            logging.error("Invalid number of reader '%u' (only %u available)",
-                          readernum, len(readers))
-            sys.exit()
-
-        # Connect to the reader and its card
-        # XXX this is a workaround, see on sourceforge bug #3083254
-        # should better use
-        # self.reader = smartcard.System.readers()[readernum]
-        self.reader = readers[readernum]
-        try:
-            self.session = smartcard.Session(self.reader)
-        except smartcard.Exceptions.CardConnectionException as e:
-            logging.error("Error connecting to card: %s", e.message)
-            sys.exit()
-
-        logging.info("Connected to card in '%s'", self.reader)
-
-        atexit.register(self.cleanup)
-
-    def cleanup(self):
-        """
-        Close the connection to the physical card
-        """
-        try:
-            self.session.close()
-        except smartcard.Exceptions.CardConnectionException as e:
-            logging.warning("Error disconnecting from card: %s", e.message)
-
-    def getATR(self):
-        # when powerDown has been called, fetching the ATR will throw an error.
-        # In this case we must try to reconnect (and then get the ATR).
-        try:
-            atr = self.session.getATR()
-        except smartcard.Exceptions.CardConnectionException as e:
-            try:
-                # Try to reconnect to the card
-                self.session.close()
-                self.session = smartcard.Session(self.reader)
-                atr = self.session.getATR()
-            except smartcard.Exceptions.CardConnectionException as e:
-                logging.error("Error getting ATR: %s", e.message)
-                sys.exit()
-
-        return "".join([chr(b) for b in atr])
-        
     def powerUp(self):
-        # When powerUp is called multiple times the session is valid (and the
-        # card is implicitly powered) we can check for an ATR. But when
-        # powerDown has been called, the session gets lost. In this case we
-        # must try to reconnect (and power the card).
-        try:
-            self.session.getATR()
-        except smartcard.Exceptions.CardConnectionException as e:
-            try:
-                self.session = smartcard.Session(self.reader)
-            except smartcard.Exceptions.CardConnectionException as e:
-                logging.error("Error connecting to card: %s", e.message)
-                sys.exit()
-
-    def powerDown(self):
-        # There is no power down in the session context so we simply
-        # disconnect, which should implicitly power down the card.
-        try:
-            self.session.close()
-        except smartcard.Exceptions.CardConnectionException as e:
-            logging.error("Error disconnecting from card: %s", str(e))
-            sys.exit()
-
-    def execute(self, msg):
-        # sendCommandAPDU() expects a list of APDU bytes
-        apdu = map(ord, msg)
-
-        try:
-            rapdu, sw1, sw2 = self.session.sendCommandAPDU(apdu)
-        except smartcard.Exceptions.CardConnectionException as e:
-            logging.error("Error transmitting APDU: %s", str(e))
-            sys.exit()
-
-        # XXX this is a workaround, see on sourceforge bug #3083586
-        # should better use
-        # rapdu = rapdu + [sw1, sw2]
-        if rapdu[-2:] == [sw1, sw2]:
-            pass
-        else:
-            rapdu = rapdu + [sw1, sw2]
-
-        # return the response APDU as string
-        return "".join([chr(b) for b in rapdu])
-
-
-class NPAOS(Iso7816OS):
-    def __init__(self, mf, sam, ins2handler=None, maxle=MAX_EXTENDED_LE, ef_cardsecurity=None, ef_cardaccess=None, ca_key=None, cvca=None, disable_checks=False):
-        Iso7816OS.__init__(self, mf, sam, ins2handler, maxle)
-        self.ins2handler[0x86] = self.SAM.general_authenticate
-        self.ins2handler[0x2c] = self.SAM.reset_retry_counter
-        self.atr = '\x3B\x8A\x80\x01\x80\x31\xF8\x73\xF7\x41\xE0\x82\x90\x00\x75'
-        self.SAM.current_SE.disable_checks = disable_checks
-        if ef_cardsecurity:
-            ef = self.mf.select('fid', 0x011d)
-            ef.data = ef_cardsecurity
-        if ef_cardaccess:
-            ef = self.mf.select('fid', 0x011c)
-            ef.data = ef_cardaccess
-        if cvca:
-            self.SAM.current_SE.cvca = cvca
-        if ca_key:
-            self.SAM.current_SE.ca_key = ca_key
-
-
-    def formatResult(self, seekable, le, data, sw, sm):
-        if seekable:
-            # when le = 0 then we want to have 0x9000. here we only have the
-            # effective le, which is either MAX_EXTENDED_LE or MAX_SHORT_LE,
-            # depending on the APDU. Note that the following distinguisher has
-            # one false positive
-            if le > len(data) and le != MAX_EXTENDED_LE and le != MAX_SHORT_LE:
-                sw = SW["WARN_EOFBEFORENEREAD"]
-
-        result = data[:le]
-        if sm:
-            try:
-                sw, result = self.SAM.protect_result(sw, result)
-            except SwError as e:
-                logging.info(e.message)
-                import traceback
-                traceback.print_exception(*sys.exc_info())
-                sw = e.sw
-                result = ""
-                answer = self.formatResult(False, 0, result, sw, False)
-
-        return R_APDU(result, inttostring(sw)).render()
-
-
-class HandlerTestOS(SmartcardOS):
-    """
-    This class implements the commands used for the PC/SC-lite  smart  card
-    reader driver tester. See http://pcsclite.alioth.debian.org/pcsclite.html
-    and handler_test(1).
-    """
-    def __init__(self):
-        lastCommandOffcut = ''
-
-    def getATR(self):
-        return '\x3B\xD6\x18\x00\x80\xB1\x80\x6D\x1F\x03\x80\x51\x00\x61\x10\x30\x9E'
-        
-    def powerUp(self):
-        pass
+        self.mf.current = self.mf
 
     def reset(self):
-        pass
-
-    def __output_from_le(self, msg):
-        le = (ord(msg[2])<<8)+ord(msg[3])
-        return ''.join([chr(num&0xff) for num in xrange(le)])
-
-    def execute(self, msg):
-        ok = '\x90\x00'
-        error = '\x6d\x00'
-        if msg == '\x00\xA4\x04\x00\x06\xA0\x00\x00\x00\x18\x50' or msg == '\x00\xA4\x04\x00\x06\xA0\x00\x00\x00\x18\xFF':
-            logging.info('Select applet')
-            return ok
-        elif msg.startswith('\x80\x38\x00'):
-            logging.info('Time Request')
-            return ok
-        elif msg == '\x80\x30\x00\x00':
-            logging.info('Case 1, APDU')
-            return ok
-        elif msg == '\x80\x30\x00\x00\x00':
-            logging.info('Case 1, TPDU')
-            return ok
-        elif msg.startswith('\x80\x32\x00\x00'):
-            logging.info('Case 3')
-            return ok
-        elif msg.startswith('\x80\x34'):
-            logging.info('Case 2')
-            return self.__output_from_le(msg) + ok
-        elif msg.startswith('\x80\x36'):
-            if len(msg) == 5+ord(msg[4]):
-                logging.info('Case 4, TPDU')
-                self.lastCommandOffcut = self.__output_from_le(msg)
-                if len(self.lastCommandOffcut) > 0xFF:
-                    return '\x61\x00'
-                return '' + chr(len(self.lastCommandOffcut)&0xFF)
-            elif len(msg) == 6+ord(msg[4]):
-                logging.info('Case 4, APDU')
-                return self.__output_from_le(msg) + ok
-            else:
-                return error
-        elif msg.startswith('\x80\xC0\x00\x00'):
-            logging.info('Get response')
-            out = self.lastCommandOffcut[:ord(msg[4])]
-            self.lastCommandOffcut = self.lastCommandOffcut[ord(msg[4]):]
-            return out + ok
-        else:
-            return error
+        self.mf.current = self.mf
 
 
 
@@ -629,7 +378,7 @@ class VirtualICC(object):
     the vpcd, which forwards it to the application.
     """ 
     
-    def __init__(self, filename, datasetfile, card_type, host, port, readernum=None, ef_cardsecurity=None, ef_cardaccess=None, ca_key=None, cvca=None, disable_checks=False, logginglevel=logging.INFO):
+    def __init__(self, filename, datasetfile, card_type, host, port, readernum=None, ef_cardsecurity=None, ef_cardaccess=None, ca_key=None, cvca=None, disable_checks=False, esign_key=None, esign_ca_cert=None, esign_cert=None, logginglevel=logging.INFO):
         from os.path import exists
         
         logging.basicConfig(level = logginglevel, 
@@ -650,13 +399,10 @@ class VirtualICC(object):
 
         #If a dataset file is specified, read the card's data groups from disk
         if datasetfile != None:
-        if exists(datasetfile):
+            if exists(datasetfile):
                 logging.info("Reading Data Groups from file %s.",
-                            datasetfile)
+                        datasetfile)
                 self.cardGenerator.readDatagroups(datasetfile)
-        else:
-                logging.info("Data Set File %s not found, using default values for datagroups.",
-                            self.datasetfile)
 
         MF, SAM = self.cardGenerator.getCard()
         
@@ -664,12 +410,16 @@ class VirtualICC(object):
         if card_type == "iso7816" or card_type == "ePass":
             self.os = Iso7816OS(MF, SAM)
         elif card_type == "nPA":
-            self.os = NPAOS(MF, SAM, ef_cardsecurity=ef_cardsecurity, ef_cardaccess=ef_cardaccess, ca_key=ca_key, cvca=cvca, disable_checks=disable_checks)
+            from virtualsmartcard.cards.nPA import NPAOS
+            self.os = NPAOS(MF, SAM, ef_cardsecurity=ef_cardsecurity, ef_cardaccess=ef_cardaccess, ca_key=ca_key, cvca=cvca, disable_checks=disable_checks, esign_key=esign_key, esign_ca_cert=esign_ca_cert, esign_cert=esign_cert)
         elif card_type == "cryptoflex":
+            from virtualsmartcard.cards.cryptoflex import CryptoflexOS
             self.os = CryptoflexOS(MF, SAM)
         elif card_type == "relay":
+            from virtualsmartcard.cards.Relay import RelayOS
             self.os = RelayOS(readernum)
         elif card_type == "handler_test":
+            from virtualsmartcard.cards.HandlerTest import HandlerTestOS
             self.os = HandlerTestOS()
         else:
             logging.warning("Unknown cardtype %s. Will use standard card_type (ISO 7816)",
@@ -726,7 +476,7 @@ class VirtualICC(object):
     def openPort(port):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('localhost', port))
+        server_socket.bind(('', port))
         server_socket.listen(0)
         logging.info("Waiting for vpcd on port " + str(port))
         (client_socket, address) = server_socket.accept()

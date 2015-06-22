@@ -11,11 +11,11 @@ do_subst = $(SED) \
 
 BUILT_SOURCES = cmdline.h cmdline.c
 
-EXTRA_DIST  = npa-tool.ggo npa-tool.ggo.in opensc/src/libopensc/apdu.c opensc/src/libopensc/card.c
+EXTRA_DIST  = npa-tool.ggo npa-tool.ggo.in opensc/src/libopensc/apdu.c opensc/src/libopensc/card.c opensc/src/compat_strlcpy.c
 EXTRA_DIST += $(shell find -L $(top_srcdir)/src/opensc/src -path '*/.git' -prune -o -type f -a -name '*.h' -print)
 MAINTAINERCLEANFILES = $(BUILT_SOURCES) npa-tool.ggo $(dist_man1_MANS)
 
-dist_man1_MANS		= npa-tool.1
+dist_man1_MANS		= $(abs_builddir)/npa-tool.1
 
 libnpa_la_SOURCES = iso-sm.c scutil.c npa.c boxing.c
 libnpa_la_LIBADD = $(OPENSC_LIBS) $(OPENPACE_LIBS) $(OPENSSL_LIBS)
@@ -23,14 +23,9 @@ libnpa_la_CFLAGS = $(OPENSSL_CFLAGS) $(OPENPACE_CFLAGS) $(OPENSC_CFLAGS)
 libnpa_la_LDFLAGS = -no-undefined
 
 libcardnpa_la_SOURCES = card-npa.c
-libcardnpa_la_LIBADD = $(OPENSC_LIBS) libnpa.la
+libcardnpa_la_LIBADD = $(OPENSC_LIBS) $(OPENPACE_LIBS) libnpa.la
 libcardnpa_la_CFLAGS = $(OPENSSL_CFLAGS) $(OPENPACE_CFLAGS) $(OPENSC_CFLAGS)
 libcardnpa_la_LDFLAGS = -no-undefined
-
-libpkcs15npa_la_SOURCES = pkcs15-npa.c
-libpkcs15npa_la_LIBADD = $(OPENSC_LIBS) libcardnpa.la libnpa.la
-libpkcs15npa_la_CFLAGS = $(OPENSSL_CFLAGS) $(OPENPACE_CFLAGS) $(OPENSC_CFLAGS)
-libpkcs15npa_la_LDFLAGS = -no-undefined
 
 npa_tool_SOURCES = npa-tool.c $(BUILT_SOURCES)
 npa_tool_LDADD = libnpa.la $(OPENSC_LIBS) $(OPENPACE_LIBS) $(OPENSSL_LIBS)
@@ -50,7 +45,7 @@ npa-tool.ggo: npa-tool.ggo.in
 	$(do_subst) < $< > $(srcdir)/$@
 
 
-npa-tool.1: npa-tool.ggo
+$(abs_builddir)/npa-tool.1: npa-tool.ggo
 	$(HELP2MAN) \
 		--output=$@ \
 		--no-info \
@@ -61,10 +56,11 @@ npa-tool.1: npa-tool.ggo
 bin_PROGRAMS = npa-tool
 noinst_PROGRAMS = example
 
-lib_LTLIBRARIES = libnpa.la libcardnpa.la libpkcs15npa.la
+lib_LTLIBRARIES = libnpa.la libcardnpa.la
 
 noinst_HEADERS = \
 		 sslutil.h \
+		 card-npa.h \
 		 iso-sm-internal.h \
 		 ccid-types.h
 

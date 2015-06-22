@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.64])
-AC_INIT([Virtual Smart Card], [0.7], [https://github.com/frankmorgner/vsmartcard/issues], [virtualsmartcard], [http://frankmorgner.github.io/vsmartcard/virtualsmartcard/README.html])
+AC_INIT([Virtual Smart Card], [0.8], [https://github.com/frankmorgner/vsmartcard/issues], [virtualsmartcard], [http://frankmorgner.github.io/vsmartcard/virtualsmartcard/README.html])
 AC_CONFIG_SRCDIR([src/vpcd/vpcd.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
@@ -46,6 +46,7 @@ m4_ifdef([AM_SILENT_RULES],[AM_SILENT_RULES([yes])])
 # Checks for libraries.
 
 # --enable-libpcsclite
+infoplist=no
 AC_ARG_ENABLE(libpcsclite,
 	AC_HELP_STRING([--enable-libpcsclite],[Build a lightweight version of
 					libpcsclite, conflicts with PCSC-Lite @<:@default=no@:>@]),
@@ -53,12 +54,22 @@ AC_ARG_ENABLE(libpcsclite,
 if test "${libpcsclite}" = no ; then
 	PKG_CHECK_EXISTS([libpcsclite],
 					 [PKG_CHECK_MODULES([PCSC], [libpcsclite])],
-					 [AC_MSG_WARN([libpcsclite not found by pkg-config])])
+					 [AC_MSG_WARN([libpcsclite not found by pkg-config])
+					 case "$host" in
+						 *-*-darwin*)
+							SDKS_PATH="$(xcode-select -p)/Platforms/MacOSX.platform/Developer/SDKs"                                                                   
+							SDK_PATH="${SDK_PATH:-$SDKS_PATH/$(ls -1 ${SDKS_PATH} | sort -n -t. -k2 -r | head -1)}"
+							# and set the PC/SC include path
+							PCSC_CFLAGS="-I$SDK_PATH/System/Library/Frameworks/PCSC.framework/Versions/Current/Headers -DRESPONSECODE_DEFINED_IN_WINTYPES_H -I`pwd`/${top_srcdir}/MacOSX"
+							PCSC_LIBS="--framework PCSC"
+					 esac
+					 ])
 
 	saved_CPPFLAGS="$CPPFLAGS"
 	CPPFLAGS="$CPPFLAGS $PCSC_CFLAGS"
 	AC_CHECK_HEADERS(ifdhandler.h,,
-			[ AC_MSG_ERROR([ifdhandler.h not found, install libpcsclite or use ./configure PCSC_CFLAGS=...]) ])
+			[ AC_MSG_ERROR([ifdhandler.h not found, install libpcsclite or use ./configure PCSC_CFLAGS=...])], [#include <wintypes.h>])
+	AC_CHECK_HEADERS([debuglog.h])
 	CPPFLAGS="$saved_CPPFLAGS"
 
 
@@ -71,12 +82,18 @@ if test "${libpcsclite}" = no ; then
 		if test "${prefix}" = NONE ; then
 			serialdropdir="`$PKG_CONFIG libpcsclite --variable=usbdropdir`/serial"
 			if test "${serialdropdir}" = "/serial" ; then
-				AC_MSG_ERROR([use --enable-serialdropdir=DIR])
+				case "$host" in
+					*-*-darwin*) serialdropdir=/usr/libexec/SmartCardServices/drivers/ifd-vpcd.bundle/Contents/MacOS; infoplist=yes ;;
+					*) AC_MSG_ERROR([use --enable-serialdropdir=DIR])
+				esac
 			fi
 		else
 			serialdropdir="${prefix}`$PKG_CONFIG libpcsclite --variable=usbdropdir`/serial"
 			if test "${serialdropdir}" = "${prefix}/serial" ; then
-				AC_MSG_ERROR([use --enable-serialdropdir=DIR])
+				case "$host" in
+					*-*-darwin*) serialdropdir=${prefix}/usr/libexec/SmartCardServices/drivers/ifd-vpcd.bundle/Contents/MacOS; infoplist=yes ;;
+					*) AC_MSG_ERROR([use --enable-serialdropdir=DIR])
+				esac
 			fi
 		fi
 	fi
@@ -91,12 +108,18 @@ if test "${libpcsclite}" = no ; then
 		if test "${prefix}" = NONE ; then
 			serialconfdir="`$PKG_CONFIG libpcsclite --variable=serialconfdir`"
 			if test "${serialconfdir}" = "" ; then
-				serialconfdir="/etc/reader.conf.d"
+				case "$host" in
+					*-*-darwin*) serialconfdir=/usr/libexec/SmartCardServices/drivers/ifd-vpcd.bundle/Contents; infoplist=yes ;;
+					*) serialconfdir="/etc/reader.conf.d"
+				esac
 			fi
 		else
 			serialconfdir="${prefix}`$PKG_CONFIG libpcsclite --variable=serialconfdir`"
 			if test "${serialconfdir}" = "${prefix}" ; then
-				serialconfdir="${prefix}/etc/reader.conf.d"
+				case "$host" in
+					*-*-darwin*) serialconfdir=${prefix}/usr/libexec/SmartCardServices/drivers/ifd-vpcd.bundle/Contents; infoplist=yes ;;
+					*) serialconfdir="${prefix}/etc/reader.conf.d"
+				esac
 			fi
 		fi
 	fi
@@ -111,7 +134,7 @@ fi
 
 # --enable-vpcdhost
 AC_ARG_ENABLE(vpcdhost,
-	AC_HELP_STRING([--enable-vpcdhost=ADRESS],[Default address to connect to when
+	AC_HELP_STRING([--enable-vpcdhost=ADDRESS],[Default address to connect to when
 					communicating with vicc. Use "/dev/null" if vpcd shall open
 					the socket and wait for an incoming connection.
 					@<:@default=/dev/null@:>@]),
@@ -124,12 +147,39 @@ else
 fi
 
 
+# --enable-vpcdslots
+AC_ARG_ENABLE(vpcdslots,
+	AC_HELP_STRING([--enable-vpcdslots=COUNT],[Default number of slots to open.
+					vpcd will open one socket for each slot incrementing the
+					port number each time. @<:@default=2@:>@]),
+	[vpcdslots="${enableval}"], [vpcdslots=2])
+AC_SUBST(vpcdslots)
+AC_DEFINE_UNQUOTED(VPCDSLOTS, ${vpcdslots}, [number of vpcd slots])
+
+
+HAVE_QRENCODE=yes
+PKG_CHECK_EXISTS([libqrencode],
+				 [PKG_CHECK_MODULES([QRENCODE], [libqrencode])],
+				 [AC_MSG_WARN([libqrencode not found by pkg-config])])
+CPPFLAGS="$CPPFLAGS $QRENCODE_CFLAGS -I${srcdir}/src/opensc/src"
+LIBS="$LDFLAGS $QRENCODE_LIBS"
+AC_CHECK_HEADERS(qrencode.h, [], [ HAVE_QRENCODE=no ])
+AC_MSG_CHECKING([for QRcode_encodeString])
+AC_TRY_LINK_FUNC(QRcode_encodeString, [ AC_MSG_RESULT([yes]) ], [ HAVE_QRENCODE=no ])
+if test "${HAVE_QRENCODE}" = "yes"; then
+	AC_DEFINE(HAVE_QRENCODE, 1, [enable QR support])
+fi
+CPPFLAGS="$saved_CPPFLAGS"
+LIBS="$saved_LIBS"
+
+
+
 PACKAGE_SUMMARY="Smart card emulator written in Python"
 AC_SUBST(PACKAGE_SUMMARY)
 
 
 # Checks for header files.
-AC_CHECK_HEADERS([arpa/inet.h stdint.h stdlib.h string.h sys/socket.h sys/time.h unistd.h])
+AC_CHECK_HEADERS([arpa/inet.h stdint.h stdlib.h string.h sys/socket.h sys/time.h unistd.h syslog.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_TYPE_SIZE_T
@@ -140,9 +190,11 @@ AC_CHECK_DECLS([MSG_NOSIGNAL], [], [], [#include <sys/socket.h>])
 # Checks for library functions.
 AC_FUNC_MALLOC
 AC_CHECK_FUNCS([memset select socket])
+AC_CHECK_FUNCS([strlcpy strlcat], [], [], [#include <string.h>])
 
 # Select OS specific versions of source files.
 AM_CONDITIONAL([BUILD_LIBPCSCLITE], [test "${libpcsclite}" = "yes"])
+AM_CONDITIONAL([BUILD_INFOPLIST], [test "${infoplist}" = "yes"])
 AC_SUBST(BUNDLE_HOST)
 AC_SUBST(DYN_LIB_EXT)
 AC_SUBST(LIB_PREFIX)
@@ -196,7 +248,10 @@ Driver directory:     ${serialdropdir}
 Python site-packages: $(eval eval eval echo "${pythondir}")
 
 Build libpcsclite:    ${libpcsclite}
+Build Info.plist:     ${infoplist}
+Build reader.conf:    ${readerconf}
 VPCD hostname: 	      ${vpcdhost}
+VPCD slot count:      ${vpcdslots}
 
 
 Host:                 ${host}
@@ -210,6 +265,8 @@ PTHREAD_LIBS:         ${PTHREAD_LIBS}
 PTHREAD_CFLAGS:       ${PTHREAD_CFLAGS}
 PCSC_CFLAGS:          ${PCSC_CFLAGS}
 PCSC_LIBS:            ${PCSC_LIBS}
+QRENCODE_CFLAGS:      ${QRENCODE_CFLAGS}
+QRENCODE_LIBS:        ${QRENCODE_LIBS}
 BUNDLE_HOST:          ${BUNDLE_HOST}
 LIB_PREFIX:           ${LIB_PREFIX}
 DYN_LIB_EXT:          ${DYN_LIB_EXT}
@@ -230,5 +287,7 @@ AC_CONFIG_FILES([Makefile
                  src/ifd-vpcd/Makefile
                  src/vpcd/Makefile
                  src/vpicc/Makefile
+                 src/vpcd-config/Makefile
+                 MacOSX/Makefile
                  ])
 AC_OUTPUT

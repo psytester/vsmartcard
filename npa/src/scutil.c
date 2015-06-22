@@ -20,6 +20,22 @@
 #include "config.h"
 #endif
 
+#include "libopensc/internal.h"
+
+#if !defined(HAVE_SC_APDU_GET_OCTETS) || !defined(HAVE_SC_APDU_SET_RESP)
+/* Pull request for exporting sc_apdu_get_octets is pending. */
+#include "libopensc/apdu.c"
+#endif
+
+#ifndef HAVE__SC_MATCH_ATR
+/* I hate to do this, but to include _sc_match_atr we need to satisfy all
+ * dependencies of card.c */
+#include "common/compat_strlcpy.c"
+#include "common/libscdl.c"
+#include "libopensc/sc.c"
+#include "libopensc/card.c"
+#endif
+
 #include <libopensc/log.h>
 #include <npa/iso-sm.h>
 #include <npa/scutil.h>
@@ -140,11 +156,11 @@ int print_avail(int verbose)
         return 1;
     }
     ctx->debug = verbose;
+	ctx->enable_default_driver = 1;
 
     r = list_readers(ctx);
 
-    if (ctx)
-        sc_release_context(ctx);
+    sc_release_context(ctx);
 
     return r;
 }
@@ -223,7 +239,7 @@ int write_binary_rec(sc_card_t *card, unsigned char sfid,
     size_t write = MAX_SM_APDU_DATA_SIZE, wrote = 0;
     sc_apdu_t apdu;
 #ifdef ENABLE_SM
-    struct iso_sm_ctx *iso_sm_ctx = card->sm_ctx.info.cmd_data;
+    struct iso_sm_ctx *iso_sm_ctx;
 #endif
 
     if (!card) {
@@ -232,6 +248,7 @@ int write_binary_rec(sc_card_t *card, unsigned char sfid,
     }
 
 #ifdef ENABLE_SM
+    iso_sm_ctx = card->sm_ctx.info.cmd_data;
     if (write > SC_MAX_APDU_BUFFER_SIZE-2
             || (card->sm_ctx.sm_mode == SM_MODE_TRANSMIT
                 && write > (((SC_MAX_APDU_BUFFER_SIZE-2
@@ -279,5 +296,43 @@ int write_binary_rec(sc_card_t *card, unsigned char sfid,
     r = SC_SUCCESS;
 
 err:
+    return r;
+}
+
+int fread_to_eof(const char *file, unsigned char **buf, size_t *buflen)
+{
+    FILE *input = NULL;
+    int r = 0;
+    unsigned char *p;
+
+    if (!buflen || !buf)
+        goto err;
+
+#define MAX_READ_LEN 0xfff
+    p = realloc(*buf, MAX_READ_LEN);
+    if (!p)
+        goto err;
+    *buf = p;
+
+    input = fopen(file, "rb");
+    if (!input) {
+        fprintf(stderr, "Could not open %s.\n", file);
+        goto err;
+    }
+
+    *buflen = 0;
+    while (feof(input) == 0 && *buflen < MAX_READ_LEN) {
+        *buflen += fread(*buf+*buflen, 1, MAX_READ_LEN-*buflen, input);
+        if (ferror(input)) {
+            fprintf(stderr, "Could not read %s.\n", file);
+            goto err;
+        }
+    }
+
+    r = 1;
+err:
+    if (input)
+        fclose(input);
+
     return r;
 }

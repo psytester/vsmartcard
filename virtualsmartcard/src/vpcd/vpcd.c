@@ -51,13 +51,6 @@ typedef WORD uint16_t;
 #include <string.h>
 #include <sys/types.h>
 
-#define VPCD_CTRL_LEN 	1
-
-#define VPCD_CTRL_OFF   0
-#define VPCD_CTRL_ON    1
-#define VPCD_CTRL_RESET 2
-#define VPCD_CTRL_ATR	4
-
 static ssize_t sendToVICC(struct vicc_ctx *ctx, size_t size, const unsigned char *buffer);
 static ssize_t recvFromVICC(struct vicc_ctx *ctx, unsigned char **buffer);
 
@@ -96,12 +89,12 @@ static int opensock(unsigned short port)
     if (sock < 0)
         return -1;
 
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *) &yes, sizeof yes) != 0)
-		return -1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *) &yes, sizeof yes) != 0) 
+        goto err;
 
 #if HAVE_DECL_SO_NOSIGPIPE
     if (setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, (void *) &yes, sizeof yes) != 0)
-		return -1;
+        goto err;
 #endif
 
     memset(&server_sockaddr, 0, sizeof server_sockaddr);
@@ -110,13 +103,22 @@ static int opensock(unsigned short port)
     server_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sock, (struct sockaddr *) &server_sockaddr,
-                sizeof server_sockaddr) != 0)
-        return -1;
+                sizeof server_sockaddr) != 0)  {
+        perror(NULL);
+        goto err;
+    }
 
-    if (listen(sock, 0) != 0)
-        return -1;
+    if (listen(sock, 0) != 0) {
+        perror(NULL);
+        goto err;
+    }
 
     return sock;
+
+err:
+    close(sock);
+
+    return -1;
 }
 
 static int connectsock(const char *hostname, unsigned short port)
@@ -306,6 +308,7 @@ int vicc_exit(struct vicc_ctx *ctx)
                 r -= 1;
             }
         }
+        free(ctx);
 #ifdef _WIN32
         WSACleanup();
 #endif
@@ -321,9 +324,12 @@ ssize_t vicc_transmit(struct vicc_ctx *ctx,
     ssize_t r = -1;
 
     if (ctx && lock(ctx->io_lock)) {
-        r = sendToVICC(ctx, apdu_len, apdu);
+        if (apdu_len && apdu)
+            r = sendToVICC(ctx, apdu_len, apdu);
+        else
+            r = 1;
 
-        if (r > 0)
+        if (r > 0 && rapdu)
             r = recvFromVICC(ctx, rapdu);
 
         unlock(ctx->io_lock);
@@ -335,16 +341,16 @@ ssize_t vicc_transmit(struct vicc_ctx *ctx,
     return r;
 }
 
-int vicc_present(struct vicc_ctx *ctx) {
-    unsigned char *atr = NULL;
 
+int vicc_connect(struct vicc_ctx *ctx, long secs, long usecs)
+{
     if (!ctx)
         return 0;
 
     if (ctx->client_sock < 0) {
         if (ctx->server_sock) {
             /* server mode, try to accept a client */
-            ctx->client_sock = waitforclient(ctx->server_sock, 0, 0);
+            ctx->client_sock = waitforclient(ctx->server_sock, secs, usecs);
             if (!ctx->client_sock) {
                 ctx->client_sock = -1;
             }
@@ -357,9 +363,15 @@ int vicc_present(struct vicc_ctx *ctx) {
     if (ctx->client_sock < 0)
         /* not connected */
         return 0;
+    else
+        return 1;
+}
+
+int vicc_present(struct vicc_ctx *ctx) {
+    unsigned char *atr = NULL;
 
     /* get the atr to check if the card is still alive */
-    if (vicc_getatr(ctx, &atr) <= 0)
+    if (!vicc_connect(ctx, 0, 0) || vicc_getatr(ctx, &atr) <= 0)
         return 0;
 
     free(atr);

@@ -148,6 +148,7 @@ static int format_le(size_t le, struct sc_asn1_entry *le_entry,
     p = realloc(*lebuf, *le_len);
     if (!p)
         return SC_ERROR_OUT_OF_MEMORY;
+    *lebuf = p;
 
     switch (*le_len) {
         case 1:
@@ -165,7 +166,6 @@ static int format_le(size_t le, struct sc_asn1_entry *le_entry,
         default:
             return SC_ERROR_INVALID_ARGUMENTS;
     }
-    *lebuf = p;
 
     sc_format_asn1_entry(le_entry, *lebuf, le_len, SC_ASN1_PRESENT);
 
@@ -720,20 +720,6 @@ int iso_sm_start(struct sc_card *card, struct iso_sm_ctx *sctx)
     return SC_SUCCESS;
 }
 
-int sm_stop(struct sc_card *card)
-{
-    int r = SC_SUCCESS;
-
-    if (card) {
-        if (card->sm_ctx.sm_mode == SM_MODE_TRANSMIT
-                && card->sm_ctx.ops.close)
-            r = card->sm_ctx.ops.close(card);
-        card->sm_ctx.sm_mode = SM_MODE_NONE;
-    }
-
-    return r;
-}
-
 #else
 
 int iso_sm_close(struct sc_card *card)
@@ -756,11 +742,6 @@ void iso_sm_ctx_clear_free(struct iso_sm_ctx *sctx)
 }
 
 int iso_sm_start(struct sc_card *card, struct iso_sm_ctx *sctx)
-{
-    return SC_ERROR_NOT_SUPPORTED;
-}
-
-int sm_stop(struct sc_card *card)
 {
     return SC_ERROR_NOT_SUPPORTED;
 }

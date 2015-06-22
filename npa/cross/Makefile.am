@@ -1,6 +1,46 @@
+EXTRA_DIST=opensc.conf_win32
+
 all-local:
 	@echo Use \`$(MAKE) win\` to cross compile for Windows
 	@echo Use \`$(MAKE) android\` to cross compile for Android
+
+
+
+OSX_TOOLS_DIR = "$(shell xcode-select -p)/Platforms/MacOSX.platform/Developer/SDKs"
+OSX_TOOL_DIR ?= "$(OSX_TOOLS_DIR)/$(shell ls -1 $(OSX_TOOLS_DIR) | sort -n -k2 -t. -r | head -1)/usr"
+OSX_TARGETDIR = $(abs_top_builddir)/$(PACKAGE_TARNAME)-$(PACKAGE_VERSION)_osx
+osx: $(OPENPACE_MAKEFILE) $(OPENSC_CONFIGURE)
+	@echo Compiling OpenPACE
+	$(MAKE) -C $(OPENPACE) osx
+	rm -rf $(OSX_TARGETDIR) dmg $(top_builddir)/$(PACKAGE_TARNAME)-$(PACKAGE_VERSION)_osx.dmg
+	cp -r $(OPENPACE)/*_osx $(OSX_TARGETDIR)
+	@echo Configuring OpenSC
+	grep _sc_card_add_ec_alg $(OPENSC)/src/libopensc/libopensc.exports || echo _sc_card_add_ec_alg >> $(OPENSC)/src/libopensc/libopensc.exports
+	grep _sc_card_add_rsa_alg $(OPENSC)/src/libopensc/libopensc.exports || echo _sc_card_add_rsa_alg >> $(OPENSC)/src/libopensc/libopensc.exports
+	grep _sc_match_atr $(OPENSC)/src/libopensc/libopensc.exports || echo _sc_match_atr >> $(OPENSC)/src/libopensc/libopensc.exports
+	grep sc_apdu_get_octets $(OPENSC)/src/libopensc/libopensc.exports || echo sc_apdu_get_octets >> $(OPENSC)/src/libopensc/libopensc.exports
+	grep sc_pkcs15_pincache_add $(OPENSC)/src/libopensc/libopensc.exports || echo sc_pkcs15_pincache_add >> $(OPENSC)/src/libopensc/libopensc.exports
+	@echo Compiling OpenSC
+	cd $(OPENSC) && OPENSSL_LIBS="-L$(OSX_TARGETDIR)/Library/OpenPACE/lib -lcrypto" OPENSSL_CFLAGS="-I$(OSX_TARGETDIR)/Library/OpenPACE/include" MacOSX/build
+	@echo Configuring libnpa
+	cd $(top_builddir) && ./configure --prefix=/Library/nPA \
+		PKG_CONFIG_SYSROOT_DIR=$(OSX_TARGETDIR) \
+		PKG_CONFIG_PATH=$(OSX_TARGETDIR)/Library/OpenPACE/lib/pkgconfig \
+		OPENSC_LIBS="-L$(OPENSC)/target/Library/OpenSC/lib -lopensc" \
+		CFLAGS="-arch i386 -arch x86_64"
+	@echo Compiling libnpa
+	make -C $(top_builddir) install DESTDIR=$(OSX_TARGETDIR)
+	mkdir -p $(OSX_TARGETDIR)/Library/nPA/etc
+	cp $(top_builddir)/opensc.conf $(OSX_TARGETDIR)/Library/nPA/etc/opensc.conf
+	rm -rf $(OSX_TARGETDIR)/Library/OpenPACE
+	pkgbuild --root $(OSX_TARGETDIR) --scripts MacOSX_install --identifier com.vsmartcard.npa.mac --version $(PACKAGE_VERSION) --install-location / nPA-$(PACKAGE_VERSION)_install.pkg
+	pkgbuild --nopayload --identifier com.vsmartcard.npa.mac.uninstall --scripts MacOSX_uninstall Uninstall_nPA.pkg
+	mkdir -p dmg
+	cp *.pkg dmg
+	cp $(OPENPACE)/cross/*.pkg dmg
+	cp $(OPENSC)/OpenSC-*.pkg dmg
+	cp $(OPENSC)/Uninstall_OpenSC.pkg dmg
+	hdiutil create -srcfolder dmg -volname "$(PACKAGE_STRING) for Mac OS X" $(top_builddir)/$(PACKAGE_TARNAME)-$(PACKAGE_VERSION)_osx.dmg
 
 
 
@@ -13,8 +53,10 @@ win:
 		TOOL=$(WIN_TOOL) \
 		TOOL_DIR=$(WIN_TOOL_DIR) \
 		TARGETDIR=$(WIN_TARGETDIR) \
+		LDFLAGS="-static-libgcc" \
 		LIBEAC=$(WIN_TARGETDIR)/bin/libeac-0.dll \
 		LIBNPA=$(WIN_TARGETDIR)/bin/libnpa-0.dll
+	cp opensc.conf_win32 $(WIN_TARGETDIR)/etc/opensc.conf
 
 
 
@@ -55,16 +97,20 @@ clean-local:
 
 cross: $(LIBNPA)
 
-$(LIBNPA): $(OPENPACE_MAKEFILE)
+$(LIBNPA): $(OPENPACE_MAKEFILE) $(OPENSC_CONFIGURE)
 	@echo Compiling OpenPACE
-	$(MAKE) -C $(OPENPACE)/cross cross \
+	env ac_cv_func_malloc_0_nonnull=yes $(MAKE) -C $(OPENPACE)/cross cross \
 		TOOL=$(TOOL) \
 		TOOL_DIR=$(TOOL_DIR) \
 		TARGETDIR=$(TARGETDIR) \
+		LDFLAGS="$${LDFLAGS}" \
 		LIBEAC=$(LIBEAC)
 	@echo Configuring OpenSC
+	grep _sc_card_add_ec_alg $(OPENSC)/src/libopensc/libopensc.exports || echo _sc_card_add_ec_alg >> $(OPENSC)/src/libopensc/libopensc.exports
+	grep _sc_card_add_rsa_alg $(OPENSC)/src/libopensc/libopensc.exports || echo _sc_card_add_rsa_alg >> $(OPENSC)/src/libopensc/libopensc.exports
 	grep _sc_match_atr $(OPENSC)/src/libopensc/libopensc.exports || echo _sc_match_atr >> $(OPENSC)/src/libopensc/libopensc.exports
 	grep sc_apdu_get_octets $(OPENSC)/src/libopensc/libopensc.exports || echo sc_apdu_get_octets >> $(OPENSC)/src/libopensc/libopensc.exports
+	grep sc_pkcs15_pincache_add $(OPENSC)/src/libopensc/libopensc.exports || echo sc_pkcs15_pincache_add >> $(OPENSC)/src/libopensc/libopensc.exports
 	cd $(OPENSC) && ./configure \
 		--prefix=/ \
 		--host=$(TOOL) --target=$(TOOL) \
@@ -72,8 +118,8 @@ $(LIBNPA): $(OPENPACE_MAKEFILE)
 		PKG_CONFIG_SYSROOT_DIR=$(TARGETDIR) \
 		PKG_CONFIG_LIBDIR=$(TARGETDIR)/lib/pkgconfig \
 		PKG_CONFIG_PATH=$(TARGETDIR)/lib/pkgconfig \
-		CFLAGS=-I$(TOOL_DIR)/include \
-		LDFLAGS=-L$(TOOL_DIR)/lib
+		CFLAGS="-I$(TOOL_DIR)/include -I$(TARGETDIR)/include" \
+		LDFLAGS="$${LDFLAGS} -L$(TOOL_DIR)/lib"
 	@echo Compiling OpenSC
 	$(MAKE) -C $(OPENSC) install DESTDIR=$(TARGETDIR)
 	@echo Configuring libnpa
@@ -84,8 +130,8 @@ $(LIBNPA): $(OPENPACE_MAKEFILE)
 		PKG_CONFIG_LIBDIR=$(TARGETDIR)/lib/pkgconfig \
 		PKG_CONFIG_PATH=$(TARGETDIR)/lib/pkgconfig \
 		OPENSC_LIBS="-L$(TARGETDIR)/lib -lopensc" \
-		CFLAGS=-I$(TOOL_DIR)/include \
-		LDFLAGS=-L$(TOOL_DIR)/lib
+		CFLAGS="-I$(TOOL_DIR)/include -I$(TARGETDIR)/include" \
+		LDFLAGS="$${LDFLAGS} -L$(TOOL_DIR)/lib"
 	@echo Compiling libnpa
 	env CROSS_COMPILE=$(CROSS_COMPILE) \
 		$(MAKE) -C $(top_builddir) install DESTDIR=$(TARGETDIR)

@@ -44,6 +44,7 @@ extern int verbose;
 
 extern struct rf_driver driver_openpicc;
 extern struct rf_driver driver_libnfc;
+extern struct rf_driver driver_vicc;
 
 struct sc_driver {
     int (*connect) (driver_data_t **driver_data);
@@ -57,6 +58,9 @@ extern struct sc_driver driver_pcsc;
 extern unsigned int readernum;
 extern struct sc_driver driver_vpcd;
 extern unsigned int vpcdport;
+extern char *vpcdhostname;
+extern unsigned int viccport;
+extern char *vicchostname;
 
 void hexdump(const char *label, unsigned char *buf, size_t len);
 

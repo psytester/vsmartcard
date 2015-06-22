@@ -48,35 +48,26 @@ reader.
 
 The file :file:`utils.py` was taken from Henryk Plötz's cyberflex-shell_.
 
-.. tikz:: Virtual Smart Card used with PCSC-Lite
+.. tikz:: Virtual Smart Card used with PCSC-Lite or WinSCard
     :stringsubst:
     :libs: arrows, calc, fit, patterns, plotmarks, shapes.geometric, shapes.misc, shapes.symbols, shapes.arrows, shapes.callouts, shapes.multipart, shapes.gates.logic.US, shapes.gates.logic.IEC, er, automata, backgrounds, chains, topaths, trees, petri, mindmap, matrix, calendar, folding, fadings, through, positioning, scopes, decorations.fractals, decorations.shapes, decorations.text, decorations.pathmorphing, decorations.pathreplacing, decorations.footprints, decorations.markings, shadows
  
     \input{%(wd)s/bilder/tikzstyles.tex}
 	\node (pcsclite)
-    [klein, aktivbox, shape=rectangle split, rectangle split parts=3, inner xsep=3em]
-	{PCSC-Lite
-	\nodepart{second}
-	\footnotesize \texttt{libpcsclite}
-	\nodepart{third}
-    \footnotesize \texttt{pcscd}
+    [klein, aktivbox, inner xsep=.7cm, text width=3cm]
+	{PC/SC Framework\\\
+    (\texttt{pcscd} or \texttt{SCardSvr})
 	};
-    \node (pcsc) [box, kleiner, at=(pcsclite.two west)] {PC/SC};
-    \node (sca) [aktivbox, klein, left=of pcsc, align=center] {Smart Card\\Application};
-    \node (vpcd) [box, at=(pcsclite.three east)] {\texttt{vpcd}};
-	\node (vicc) [aktivbox, right=of vpcd] {\texttt{vicc}};
+    \node (sca) [aktivbox, klein, left=of pcsclite] {Smart Card\\Application};
+    \node (vpcd) [box, at=(pcsclite.east), xshift=-.3cm] {\texttt{vpcd}};
+	\node (vicc) [aktivbox, right=2cm of pcsclite] {\texttt{vicc}};
 
     \begin{pgfonlayer}{background}
         \path[linie]
-        (sca) edge (pcsc)
-        (vpcd) edge (vicc)
+        (sca) edge (pcsclite)
+        (vpcd) edge node {\includegraphics[width=1.2cm]{%(wd)s/bilder/simplecloud.pdf}} (vicc)
         ;
     \end{pgfonlayer}
-
-.. versionadded:: 0.7
-    We implemented |vpcd| as user mode device driver for Windows so that
-    |vpicc| can directly be used in Windows' smart card applications that use
-    PC/SC.
 
 .. versionadded:: 0.7
     The Virtual Smart Card optionally brings its own standalone implementation of
@@ -90,69 +81,95 @@ The file :file:`utils.py` was taken from Henryk Plötz's cyberflex-shell_.
  
     \input{%(wd)s/bilder/tikzstyles.tex}
 	\node (pcsclite)
-    [box, shape=rectangle split, rectangle split parts=2, inner xsep=3em]
-	{Virtual Smart Card
-	\nodepart{second}
-	\footnotesize \texttt{libpcsclite} with \texttt{vpcd}
+    [klein, box, text width=4cm]
+	{Virtual Smart Card's\\
+    PC/SC Framework
 	};
-    \node (pcsc) [box, kleiner, at=(pcsclite.two west)] {PC/SC};
-    \node (sca) [aktivbox, klein, left=of pcsc, align=center] {Smart Card\\Application};
-	\node (vicc) [aktivbox, right=of pcsclite.two east] {\texttt{vicc}};
+    \node (sca) [aktivbox, klein, left=of pcsclite] {Smart Card\\Application};
+	\node (vicc) [aktivbox, right=2cm of pcsclite] {\texttt{vicc}};
 
     \begin{pgfonlayer}{background}
         \path[linie]
-        (sca) edge (pcsc)
-        (pcsclite.two east) edge (vicc)
+        (sca) edge (pcsclite)
+        (pcsclite) edge node {\includegraphics[width=1.5cm]{%(wd)s/bilder/simplecloud.pdf}} (vicc)
         ;
     \end{pgfonlayer}
 
+On Android, where a traditional PC/SC framework is not available, you can use
+our framework to make your real contact-less smart accessible through PKCS#11.
+For example, an email signing application can use the PKCS#11 interface of
+OpenSC, which is linked against our PC/SC implementation. Then an Android App
+(e.g. :ref:`remote-reader`) can connect as |vpicc| delegating all requests
+and responses via NFC to a contact-less smart card that signs the mail.
 
-
-.. include:: relay-note.txt
-
-
-.. include:: download.txt
-
-
-.. include:: autotools.txt
-
-Depending on your usage of the |vpicc| you might or might not need
-the following:
+Depending on your usage of the |vpicc| you may need to install the following:
 
 - Python_
 - pyscard_
 - PyCrypto_
 - PBKDF2_
 - PIP_
+- readline_ or PyReadline_
 - OpenPACE_ (nPA emulation)
+
+
+.. include:: download.txt
+
+
+.. _vicc_install:
+
+.. include:: autotools.txt
 
 
 ================================================================================
 Building and installing |vpcd| on Windows
 ================================================================================
 
+.. versionadded:: 0.7
+    We implemented |vpcd| as user mode device driver for Windows so that
+    |vpicc| can directly be used in Windows' smart card applications that use
+    PC/SC.
+
 For the Windows integration we extended `Fabio Ottavi's UMDF Driver for a
-Virtual Smart Card Reader`_ with a |vpcd| interface. To build the |vpcd| we use
-`Windows Driver Kit 8.1 and Visual Studio 2013`_:
+Virtual Smart Card Reader`_ with a |vpcd| interface. To build |vpcd| for
+Windows we use `Windows Driver Kit 8.1 and Visual Studio 2013`_. If you choose
+to download the `Windows binaries`_, you may directly jump to step 3.
+
 
 1. In Visual Studio select :menuselection:`File --> Open --> Convert
    Sources/Dirs...` and choose the vpcd's :file:`sources` either in the
-   :file:`WinXP` or :file:`Win7` folder.
+   :file:`WinXP` [#footnote1]_ or :file:`Win7` folder.
+
+   When successfully imported, ensure with the configuration manager, that both
+   of the created projects are built for the same platform (x64 or Win32).
 
 2. If you can successfully :guilabel:`Build the solution`, you can find the
    install package in :file:`BixVReader-package`. It contains `BixVReader.inf`
-   and the required libraries, especially `BixVReader.dll`.
+   and the required libraries, especially `BixVReader.dll` and
+   `WudfUpdate_01009.dll` [#footnote2]_.
 
 3. Copy :file:`win32\\BixVReader\\BixVReader.ini` into the :envvar:`%SystemRoot%`
    directory.
 
 4. In a console with administrator rights go to :file:`BixVReader-package` and
-   execute::
+   install the driver::
 
    "C:\Program Files\Windows Kits\8.1\Tools\x86\devcon.exe" install BixVReader.inf root\BixVirtualReader
    
    You can adjust the path to ``devcon.exe`` with your version of the WDK and
-   your target architecture.
+   your target architecture (e.g., use ``...\x64\devcon.exe`` for a 64 bit
+   driver).
+
+   For Win7 and older, code signing is optional and will yield a warning during
+   installation when missing. Simply click continue to install the driver anyway.
+
+   To activate the WDK test signing, use VS build-in Driver Signing settings.
+   Right click :guilabel:`BixVReader-package` :menuselection:`Properties -->
+   Driver Signing --> Sign Mode --> Test Sign`.  Import the WDKTestCert
+   certificate :file:`BixVReader-package.cer` into your windows keystore (e.g.
+   on local computer) and then install the driver. See
+   `Microsoft's Kernel-Mode Code Signing Walkthrough`_ for
+   details.
 
 For debugging |vpcd| and building the driver with an older version of Visual
 Studio or WDK please see `Fabio Ottavi's UMDF Driver for a Virtual Smart Card
@@ -171,12 +188,12 @@ we will focus on configuring and running the provided modules.
 Configuring |vpcd| on Unix
 ================================================================================
 
-The configuration file from |vpcd| is usually placed into
-:file:`/etc/reader.conf.d/`. The PC/SC daemon should read it and load the
-|vpcd| on startup. In debug mode :command:`pcscd -f -d` should say something
-like "Attempting startup of Virtual PCD". For older versions of PCSC-Lite you
+The configuration file of |vpcd| is usually placed into
+:file:`/etc/reader.conf.d/`. For older versions of PCSC-Lite you
 need to run :command:`update-reader.conf` to update :command:`pcscd`'s main
-configuration file.
+configuration file. The PC/SC daemon should read it and load the
+|vpcd| on startup. In debug mode :command:`pcscd -f -d` should say something
+like "Attempting startup of Virtual PCD" when loading |vpcd|.
 
 By default, |vpcd| opens a socket for |vpicc| and waits for incoming
 connections.  The port to open should be specified in ``CHANNELID`` and
@@ -193,15 +210,16 @@ needs to be started with :option:`--reversed` in this case.
 Configuring |vpcd| on Windows
 ================================================================================
 
-The configuration file from |vpcd| is usually placed into
-:file:`C:\\Windows`. The PC/SC daemon should read it and load the
-|vpcd| on startup. The Windows Device Manager should list the :guilabel:`Bix
-Virtual Smart Card Reader`.
+The configuration file `BixVReader.ini` of |vpcd| is usually placed into
+:file:`C:\\Windows` (:envvar:`SystemRoot`). The user mode device driver
+framework (:command:`WUDFHost.exe`) should read it automatically and load the
+|vpcd| on startup. The Windows Device Manager :command:`mmc devmgmt.msc` should
+list the :guilabel:`Bix Virtual Smart Card Reader`.
 
 |vpcd| opens a socket for |vpicc| and waits for incoming
 connections. The port to open should be specified in ``TCP_PORT``:
 
-.. literalinclude:: BixVReader.ini
+.. literalinclude:: ../win32/BixVReader/BixVReader.ini
     :emphasize-lines: 8
 
 Currently it is not possible to configure the Windows driver to connect to an
@@ -211,13 +229,22 @@ Currently it is not possible to configure the Windows driver to connect to an
 Running |vpicc|
 ================================================================================
 
-The command :command:`vicc --help` gives an overview about the command line
-options of |vpicc|.
+The compiled `Windows binaries`_ of |vpicc| include OpenPACE. The other
+dependencies listed above need to be installed seperately. You can start the
+|vpicc| via :command:`python.exe vicc.py`. On all other systems an executable
+script :command:`vicc` is installed using the autotools.
+
+The |vpicc| option :option:`--help` gives an overview about the command line
+switches:
 
 .. program-output:: vicc --help
 
-On Windows you can start |vpicc| with :command:`python.exe src/vpicc/vicc.in`
-or :command:`python.exe vicc`.
+.. versionadded:: 0.7
+    We implemented :command:`vpcd-config` which tries to guess the local IP
+    address and outputs |vpcd|'s configuration. |vpicc|'s options should be
+    chosen accordingly (:option:`--hostname` and :option:`--port`)
+    :command:`vpcd-config` also prints a QR code for configuration of the
+    :ref:`remote-reader`.
 
 When |vpcd| and |vpicc| are connected you should be able to access the card
 through the PC/SC API. You can use the :command:`opensc-explorer` or
@@ -235,13 +262,20 @@ Notes and References
 
 .. target-notes::
 
+.. [#footnote1] With VS 2013 and WDK 8.1 no Windows XP driver can be build. You need to use an older version of VS with WDK 7.1.0.
+.. [#footnote2] Note that WudfUpdate_01009.dll for 32 bit will be around 1795 KB and for 64 bit around 2102 KB big.
+
 .. _cyberflex-shell: https://github.com/henryk/cyberflex-shell
 .. _PCSC-lite: http://pcsclite.alioth.debian.org/
 .. _Python: http://www.python.org/
 .. _pyscard: http://pyscard.sourceforge.net/
 .. _PyCrypto: http://pycrypto.org/
 .. _PBKDF2: https://www.dlitz.net/software/python-pbkdf2/
+.. _readline: https://docs.python.org/3.3/library/readline.html
+.. _PyReadline: https://pypi.python.org/pypi/pyreadline
 .. _PIP: http://www.pythonware.com/products/pil/
 .. _OpenPACE: https://github.com/frankmorgner/openpace
 .. _`Fabio Ottavi's UMDF Driver for a Virtual Smart Card Reader`: http://www.codeproject.com/Articles/134010/An-UMDF-Driver-for-a-Virtual-Smart-Card-Reader
 .. _`Windows Driver Kit 8.1 and Visual Studio 2013`: http://msdn.microsoft.com/en-us/windows/hardware/hh852365.aspx
+.. _`Microsoft's Kernel-Mode Code Signing Walkthrough`: http://msdn.microsoft.com/en-us/library/windows/hardware/dn653569%28v=vs.85%29.aspx
+.. _`Windows binaries`: https://github.com/frankmorgner/vsmartcard/releases/download/virtualsmartcard-0.7/virtualsmartcard-0.7_win32.zip

@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.63])
-AC_INIT([nPA Smart Card Library], [0.6], [https://github.com/frankmorgner/vsmartcard/issues], [npa], [http://frankmorgner.github.io/vsmartcard/npa/README.html])
+AC_INIT([nPA Smart Card Library], [0.7], [https://github.com/frankmorgner/vsmartcard/issues], [npa], [http://frankmorgner.github.io/vsmartcard/npa/README.html])
 AC_CONFIG_SRCDIR([src/npa.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
@@ -57,8 +57,8 @@ LIBS="$LDFLAGS $OPENSC_LIBS"
 
 AC_CHECK_HEADERS([libopensc/opensc.h libopensc/sm.h libopensc/pace.h],
                  [], [AC_MSG_ERROR([OpenSC headers not found])])
-AC_MSG_CHECKING([for iasecc_sm_external_authentication])
-AC_TRY_LINK_FUNC(iasecc_sm_external_authentication,
+AC_MSG_CHECKING([for sc_sm_stop])
+AC_TRY_LINK_FUNC(sc_sm_stop,
                  [ AC_MSG_RESULT([yes]) ],
                  [ AC_MSG_ERROR([Cannot link against libopensc with SM]) ])
 AC_CHECK_FUNCS([sc_apdu_get_octets _sc_match_atr list_iterator_next])
@@ -159,7 +159,7 @@ AC_TYPE_UINT8_T
 # Checks for library functions.
 AC_FUNC_MALLOC
 AC_FUNC_REALLOC
-AC_CHECK_FUNCS([getline memmove memset strerror gettimeofday strtol])
+AC_CHECK_FUNCS([getline memmove memset strerror gettimeofday strtol strlcpy])
 
 AC_SUBST(DYN_LIB_EXT)
 case "$host" in

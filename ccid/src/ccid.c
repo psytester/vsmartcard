@@ -32,6 +32,11 @@
 #include "config.h"
 
 #include <npa/scutil.h>
+
+static sc_context_t *ctx = NULL;
+static sc_card_t *card = NULL;
+static sc_reader_t *reader = NULL;
+
 #ifdef WITH_PACE
 #include <npa/boxing.h>
 #include <npa/iso-sm.h>
@@ -110,10 +115,6 @@ static int
 perform_PC_to_RDR_Secure(const __u8 *in, size_t inlen, __u8** out, size_t *outlen);
 static int
 perform_unknown(const __u8 *in, size_t inlen, __u8 **out, size_t *outlen);
-
-static sc_context_t *ctx = NULL;
-static sc_card_t *card = NULL;
-static sc_reader_t *reader = NULL;
 
 unsigned int skipfirst = 0;
 
@@ -278,9 +279,6 @@ static __u8 get_bError(int sc_result)
 {
     if (sc_result < 0) {
         switch (sc_result) {
-            case SC_SUCCESS:
-                return CCID_BERROR_OK;
-
             case SC_ERROR_KEYPAD_TIMEOUT:
                 return CCID_BERROR_PIN_TIMEOUT;
 
@@ -725,7 +723,7 @@ perform_PC_to_RDR_GetParamters(const __u8 *in, size_t inlen, __u8** out, size_t 
             result->bProtocolNum = 1;
             result->dwLength = __constant_cpu_to_le32(sizeof *t1);
 
-            t1 = (abProtocolDataStructure_T1_t *) result + sizeof *result;
+            t1 = (abProtocolDataStructure_T1_t *) (result + sizeof *result);
             /* values taken from OpenPGP-card
              * FIXME analyze ATR to get values */
             t1->bmFindexDindex     =
@@ -1353,7 +1351,7 @@ perform_PC_to_RDR_Secure(const __u8 *in, size_t inlen, __u8** out, size_t *outle
     }
 
     new_pin.min_length = curr_pin.min_length = wPINMaxExtraDigit >> 8;
-    new_pin.min_length = curr_pin.max_length = wPINMaxExtraDigit & 0x00ff;
+    new_pin.max_length = curr_pin.max_length = wPINMaxExtraDigit & 0x00ff;
 	if (new_pin.min_length > new_pin.max_length) {
 		/* If maximum length is smaller than minimum length, suppose minimum
 		 * length defines the exact length of the pin. */

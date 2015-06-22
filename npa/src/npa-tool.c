@@ -25,6 +25,7 @@
 #include <eac/pace.h>
 #include <libopensc/log.h>
 #include <libopensc/opensc.h>
+#include <libopensc/sm.h>
 #include <npa/boxing.h>
 #include <npa/iso-sm.h>
 #include <npa/npa.h>
@@ -52,44 +53,6 @@ static ssize_t getline(char **lineptr, size_t *n, FILE *stream)
     return strlen(p);
 }
 #endif
-
-int fread_to_eof(const char *file, unsigned char **buf, size_t *buflen)
-{
-    FILE *input = NULL;
-    int r = 0;
-    unsigned char *p;
-
-    if (!buflen || !buf)
-        goto err;
-
-#define MAX_READ_LEN 0xfff
-    p = realloc(*buf, MAX_READ_LEN);
-    if (!p)
-        goto err;
-    *buf = p;
-
-    input = fopen(file, "rb");
-    if (!input) {
-        fprintf(stderr, "Could not open %s.\n", file);
-        goto err;
-    }
-
-    *buflen = 0;
-    while (feof(input) == 0 && *buflen < MAX_READ_LEN) {
-        *buflen += fread(*buf+*buflen, 1, MAX_READ_LEN-*buflen, input);
-        if (ferror(input)) {
-            fprintf(stderr, "Could not read %s.\n", file);
-            goto err;
-        }
-    }
-
-    r = 1;
-err:
-    if (input)
-        fclose(input);
-
-    return r;
-}
 
 static void read_dg(sc_card_t *card, unsigned char sfid, const char *dg_str,
         unsigned char **dg, size_t *dg_len)
@@ -299,6 +262,8 @@ main (int argc, char **argv)
     unsigned char *dg = NULL;
     size_t dg_len = 0;
     ASN1_AUXILIARY_DATA *templates = NULL;
+    unsigned char *ef_cardsecurity = NULL;
+    size_t ef_cardsecurity_len = 0;
 
     struct gengetopt_args_info cmdline;
 
@@ -394,7 +359,7 @@ main (int argc, char **argv)
                             npa_secret_name(pace_input.pin_id));
                     exit(2);
                 }
-                if (strlen(can) > pace_input.pin_length) {
+                if (strlen(pin) > pace_input.pin_length) {
                     fprintf(stderr, "%s too big, only %u digits allowed.\n",
                             npa_secret_name(pace_input.pin_id),
                             (unsigned int) pace_input.pin_length);
@@ -676,9 +641,8 @@ main (int argc, char **argv)
                 pace_input.pin_length = strlen(puk);
             }
         } else {
-            fprintf(stderr, "Please specify whether to do PACE with "
-                    "PIN, CAN, MRZ or PUK.\n");
-            exit(1);
+            fprintf(stderr, "Skipping PIN verification\n");
+            goto nopace;
         }
 
         r = perform_pace(card, pace_input, &pace_output, tr_version);
@@ -687,6 +651,7 @@ main (int argc, char **argv)
         printf("Established PACE channel with %s.\n",
                 npa_secret_name(pace_input.pin_id));
 
+nopace:
         if (cmdline.cv_certificate_given || cmdline.private_key_given) {
             r = perform_terminal_authentication(card,
                     (const unsigned char **) certs, certs_lens,
@@ -695,7 +660,7 @@ main (int argc, char **argv)
                 goto err;
             printf("Performed Terminal Authentication.\n");
 
-            r = perform_chip_authentication(card);
+            r = perform_chip_authentication(card, &ef_cardsecurity, &ef_cardsecurity_len);
             if (r < 0)
                 goto err;
             printf("Performed Chip Authentication.\n");
@@ -734,7 +699,7 @@ main (int argc, char **argv)
         if (cmdline.read_dg12_flag)
             read_dg(card, 12, "Optional Data", &dg, &dg_len);
         if (cmdline.read_dg13_flag)
-            read_dg(card, 13, "DG 13", &dg, &dg_len);
+            read_dg(card, 13, "Birth Name", &dg, &dg_len);
         if (cmdline.read_dg14_flag)
             read_dg(card, 14, "DG 14", &dg, &dg_len);
         if (cmdline.read_dg15_flag)
@@ -803,6 +768,10 @@ err:
     free(pace_output.previous_car);
     free(pace_output.id_icc);
     free(pace_output.id_pcd);
+    if (ef_cardsecurity) {
+        OPENSSL_cleanse(ef_cardsecurity, ef_cardsecurity_len);
+        free(ef_cardsecurity);
+    }
     if (input)
         fclose(input);
     if (certs) {
@@ -822,7 +791,7 @@ err:
     if (templates)
         ASN1_AUXILIARY_DATA_free(templates);
 
-    sm_stop(card);
+    sc_sm_stop(card);
     sc_reset(card, 1);
     sc_disconnect_card(card);
     sc_release_context(ctx);

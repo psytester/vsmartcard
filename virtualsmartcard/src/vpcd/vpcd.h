@@ -26,6 +26,13 @@ typedef int ssize_t;
 #include <unistd.h>
 #endif
 
+#define VPCD_CTRL_LEN 	1
+
+#define VPCD_CTRL_OFF   0
+#define VPCD_CTRL_ON    1
+#define VPCD_CTRL_RESET 2
+#define VPCD_CTRL_ATR	4
+
 struct vicc_ctx {
         int server_sock;
         int client_sock;
@@ -59,6 +66,7 @@ struct vicc_ctx * vicc_init(const char *hostname, unsigned short port);
 int vicc_exit(struct vicc_ctx *ctx);
 int vicc_eject(struct vicc_ctx *ctx);
 
+int vicc_connect(struct vicc_ctx *ctx, long secs, long usecs);
 int vicc_present(struct vicc_ctx *ctx);
 int vicc_poweron(struct vicc_ctx *ctx);
 int vicc_poweroff(struct vicc_ctx *ctx);

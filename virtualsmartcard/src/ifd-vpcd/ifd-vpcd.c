@@ -16,21 +16,90 @@
  * You should have received a copy of the GNU General Public License along with
  * virtualsmartcard.  If not, see <http://www.gnu.org/licenses/>.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "ifd-vpcd.h"
 #include "vpcd.h"
-#include <debuglog.h>
+
+#include <wintypes.h>
+
 #include <errno.h>
 #include <ifdhandler.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* pcscd allows at most 16 readers. We will use 10.
- * See PCSCLITE_MAX_READERS_CONTEXTS in pcsclite.h */
-#define VICC_MAX_SLOTS \
-        PCSCLITE_MAX_READERS_CONTEXTS > 6 ? \
-        PCSCLITE_MAX_READERS_CONTEXTS-6 : 1
+/* pcscd allows at most 16 readers. Apple's SmartCardServices on OS X 10.10
+ * freaks out if more than 8 slots are registered. We want only two slots... */
+#define VICC_MAX_SLOTS (VPCDSLOTS <= PCSCLITE_MAX_READERS_CONTEXTS ? VPCDSLOTS : PCSCLITE_MAX_READERS_CONTEXTS)
 const unsigned char vicc_max_slots = VICC_MAX_SLOTS;
+
+#ifdef HAVE_DEBUGLOG_H
+
+#include <debuglog.h>
+
+#else
+
+enum {
+	PCSC_LOG_DEBUG = 0,
+	PCSC_LOG_INFO,
+	PCSC_LOG_ERROR,
+	PCSC_LOG_CRITICAL
+};
+
+#ifdef HAVE_SYSLOG_H
+
+#include <stdarg.h>
+#include <syslog.h>
+
+void log_msg(const int priority, const char *fmt, ...)
+{
+	char debug_buffer[160]; /* up to 2 lines of 80 characters */
+	va_list argptr;
+	int syslog_level;
+
+	switch(priority) {
+		case PCSC_LOG_CRITICAL:
+			syslog_level = LOG_CRIT;
+			break;
+		case PCSC_LOG_ERROR:
+			syslog_level = LOG_ERR;
+			break;
+		case PCSC_LOG_INFO:
+			syslog_level = LOG_INFO;
+			break;
+		default:
+			syslog_level = LOG_DEBUG;
+	}
+
+	va_start(argptr, fmt);
+	(void)vsnprintf(debug_buffer, sizeof debug_buffer, fmt, argptr);
+	va_end(argptr);
+
+	syslog(syslog_level, "%s", debug_buffer);
+}
+#define Log0(priority) log_msg(priority, "%s:%d:%s()", __FILE__, __LINE__, __FUNCTION__)
+#define Log1(priority, fmt) log_msg(priority, "%s:%d:%s() " fmt, __FILE__, __LINE__, __FUNCTION__)
+#define Log2(priority, fmt, data) log_msg(priority, "%s:%d:%s() " fmt, __FILE__, __LINE__, __FUNCTION__, data)
+#define Log3(priority, fmt, data1, data2) log_msg(priority, "%s:%d:%s() " fmt, __FILE__, __LINE__, __FUNCTION__, data1, data2)
+#define Log4(priority, fmt, data1, data2, data3) log_msg(priority, "%s:%d:%s() " fmt, __FILE__, __LINE__, __FUNCTION__, data1, data2, data3)
+#define Log5(priority, fmt, data1, data2, data3, data4) log_msg(priority, "%s:%d:%s() " fmt, __FILE__, __LINE__, __FUNCTION__, data1, data2, data3, data4)
+#define Log9(priority, fmt, data1, data2, data3, data4, data5, data6, data7, data8) log_msg(priority, "%s:%d:%s() " fmt, __FILE__, __LINE__, __FUNCTION__, data1, data2, data3, data4, data5, data6, data7, data8)
+
+#else
+
+#define Log0(priority) do { } while(0)
+#define Log1(priority, fmt) do { } while(0)
+#define Log2(priority, fmt, data) do { } while(0)
+#define Log3(priority, fmt, data1, data2) do { } while(0)
+#define Log4(priority, fmt, data1, data2, data3) do { } while(0)
+#define Log5(priority, fmt, data1, data2, data3, data4) do { } while(0)
+#define Log9(priority, fmt, data1, data2, data3, data4, data5, data6, data7, data8) do { } while(0)
+
+#endif
+#endif
 
 static struct vicc_ctx *ctx[VICC_MAX_SLOTS];
 const char *hostname = NULL;
@@ -117,6 +186,8 @@ IFDHControl (DWORD Lun, DWORD dwControlCode, PUCHAR TxBuffer, DWORD TxLength,
             (unsigned char *) TxBuffer, (unsigned int) TxLength,
             (unsigned char *) RxBuffer, (unsigned int) RxLength,
             (unsigned int *) pdwBytesReturned, "");
+    if (pdwBytesReturned)
+        *pdwBytesReturned = 0;
     return IFD_ERROR_NOT_SUPPORTED;
 }
 
@@ -142,12 +213,13 @@ IFDHGetCapabilities (DWORD Lun, DWORD Tag, PDWORD Length, PUCHAR Value)
     unsigned char *atr = NULL;
     ssize_t size;
     size_t slot = Lun & 0xffff;
-    if (slot >= vicc_max_slots) {
-        return IFD_COMMUNICATION_ERROR;
-    }
+    RESPONSECODE r = IFD_COMMUNICATION_ERROR;
+
+    if (slot >= vicc_max_slots)
+        goto err;
 
     if (!Length || !Value)
-        return IFD_COMMUNICATION_ERROR;
+        goto err;
 
     switch (Tag) {
         case TAG_IFD_ATR:
@@ -155,18 +227,24 @@ IFDHGetCapabilities (DWORD Lun, DWORD Tag, PDWORD Length, PUCHAR Value)
             size = vicc_getatr(ctx[slot], &atr);
             if (size < 0) {
                 Log1(PCSC_LOG_ERROR, "could not get ATR");
-                return IFD_COMMUNICATION_ERROR;
+                goto err;
             }
             if (size == 0) {
                 Log1(PCSC_LOG_ERROR, "Virtual ICC removed");
-                return IFD_ICC_NOT_PRESENT;
+                goto err;
             }
             Log2(PCSC_LOG_DEBUG, "Got ATR (%d bytes)", size);
 
+#ifndef __APPLE__
             if (*Length < size) {
+#else
+            /* Apple's new SmartCardServices on OS X 10.10 doesn't set the
+             * length correctly so we only check for the maximum  */
+            if (MAX_ATR_SIZE < size) {
+#endif
                 free(atr);
                 Log1(PCSC_LOG_ERROR, "Not enough memory for ATR");
-                return IFD_COMMUNICATION_ERROR;
+                goto err;
             }
 
             memcpy(Value, atr, size);
@@ -177,14 +255,31 @@ IFDHGetCapabilities (DWORD Lun, DWORD Tag, PDWORD Length, PUCHAR Value)
         case TAG_IFD_SLOTS_NUMBER:
             if (*Length < 1) {
                 Log1(PCSC_LOG_ERROR, "Invalid input data");
-                return IFD_COMMUNICATION_ERROR;
+                goto err;
             }
 
             *Value  = vicc_max_slots;
             *Length = 1;
             break;
 
+        case TAG_IFD_THREAD_SAFE:
+            if (*Length < 1) {
+                Log1(PCSC_LOG_ERROR, "Invalid input data");
+                goto err;
+            }
+
+            /* We are not thread safe due to
+             * the global hostname and ctx */
+            *Value  = 0;
+            *Length = 1;
+            break;
+
         case TAG_IFD_SLOT_THREAD_SAFE:
+            if (*Length < 1) {
+                Log1(PCSC_LOG_ERROR, "Invalid input data");
+                goto err;
+            }
+
             /* driver supports access to multiple slots of the same reader at
              * the same time */
             *Value  = 1;
@@ -193,10 +288,17 @@ IFDHGetCapabilities (DWORD Lun, DWORD Tag, PDWORD Length, PUCHAR Value)
 
         default:
             Log2(PCSC_LOG_DEBUG, "unknown tag %d", (int)Tag);
-            return IFD_ERROR_TAG;
+            r = IFD_ERROR_TAG;
+            goto err;
     }
 
-    return IFD_SUCCESS;
+    r = IFD_SUCCESS;
+
+err:
+    if (r != IFD_SUCCESS && Length)
+        *Length = 0;
+
+    return r;
 }
 
 RESPONSECODE
@@ -222,14 +324,17 @@ RESPONSECODE
 IFDHPowerICC (DWORD Lun, DWORD Action, PUCHAR Atr, PDWORD AtrLength)
 {
     size_t slot = Lun & 0xffff;
+    RESPONSECODE r = IFD_COMMUNICATION_ERROR;
+
     if (slot >= vicc_max_slots) {
-        return IFD_COMMUNICATION_ERROR;
+        goto err;
     }
+
     switch (Action) {
         case IFD_POWER_DOWN:
             if (vicc_poweroff(ctx[slot]) < 0) {
                 Log1(PCSC_LOG_ERROR, "could not powerdown");
-                return IFD_COMMUNICATION_ERROR;
+                goto err;
             }
 
             /* XXX see bug #312754 on https://alioth.debian.org/projects/pcsclite */
@@ -241,21 +346,30 @@ IFDHPowerICC (DWORD Lun, DWORD Action, PUCHAR Atr, PDWORD AtrLength)
         case IFD_POWER_UP:
             if (vicc_poweron(ctx[slot]) < 0) {
                 Log1(PCSC_LOG_ERROR, "could not powerup");
-                return IFD_COMMUNICATION_ERROR;
+                goto err;
             }
             break;
         case IFD_RESET:
             if (vicc_reset(ctx[slot]) < 0) {
                 Log1(PCSC_LOG_ERROR, "could not reset");
-                return IFD_COMMUNICATION_ERROR;
+                goto err;
             }
             break;
         default:
             Log2(PCSC_LOG_ERROR, "%0lX not supported", Action);
-            return IFD_NOT_SUPPORTED;
+            r = IFD_NOT_SUPPORTED;
+            goto err;
     }
 
-    return IFDHGetCapabilities (Lun, TAG_IFD_ATR, AtrLength, Atr);
+    r = IFD_SUCCESS;
+
+err:
+    if (r != IFD_SUCCESS && AtrLength)
+        *AtrLength = 0;
+    else
+        r = IFDHGetCapabilities (Lun, TAG_IFD_ATR, AtrLength, Atr);
+
+    return r;
 }
 
 RESPONSECODE
@@ -267,8 +381,9 @@ IFDHTransmitToICC (DWORD Lun, SCARD_IO_HEADER SendPci, PUCHAR TxBuffer,
     ssize_t size;
     RESPONSECODE r = IFD_COMMUNICATION_ERROR;
     size_t slot = Lun & 0xffff;
+
     if (slot >= vicc_max_slots) {
-        return IFD_COMMUNICATION_ERROR;
+        goto err;
     }
 
     if (!RxLength || !RecvPci) {
@@ -295,7 +410,7 @@ IFDHTransmitToICC (DWORD Lun, SCARD_IO_HEADER SendPci, PUCHAR TxBuffer,
     r = IFD_SUCCESS;
 
 err:
-    if (r != IFD_SUCCESS)
+    if (r != IFD_SUCCESS && RxLength)
         *RxLength = 0;
 
     free(rapdu);

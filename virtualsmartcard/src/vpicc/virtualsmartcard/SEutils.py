@@ -70,7 +70,7 @@ class ControlReferenceTemplate:
         
         :param config: a TLV string containing the configuration for the CRT. 
         """
-        
+        error = False
         structure = unpack(config)
         for tlv in structure:
             tag, length, value = tlv    
@@ -83,9 +83,12 @@ class ControlReferenceTemplate:
             elif tag == 0x95:
                 self.usage_qualifier = value
             else:
-                raise SwError(SW["ERR_REFNOTUSABLE"])
+                error = True
  
-        return SW["NORMAL"], "" 
+        if error:
+            raise SwError(SW["ERR_REFNOTUSABLE"])
+        else:
+            return SW["NORMAL"], "" 
             
     def __set_algo(self, data):
         """
@@ -394,8 +397,6 @@ class Security_Environment(object):
             p1 = CAPDU.p1
         if p2 == None:
             p2 = CAPDU.p2
-        if le == None:
-            le = CAPDU.le
         # FIXME
         #if expected != "":
             #raise SwError(SW["ERR_SECMESSOBJECTSMISSING"])
@@ -709,7 +710,7 @@ class Security_Environment(object):
         else:
             raise SwError(SW["ERR_CONDITIONNOTSATISFIED"])
 
-        result = bertlv_pack((0x7F49, len(pk), pk))
+        result = bertlv_pack([[0x7F49, len(pk), pk]])
         #TODO: Internally store key pair
 
         if p1 & 0x02 == 0x02:

@@ -59,6 +59,12 @@ compatible with OpenSC.
         (libnpa) edge (openpace);
     \end{pgfonlayer}
 
+The nPA Smart Card Library has the following dependencies:
+
+- OpenPACE_
+- OpenSC_
+- OpenSSL_
+
 
 .. include:: download.txt
 
@@ -66,12 +72,6 @@ compatible with OpenSC.
 .. _npa-install:
 
 .. include:: autotools.txt
-
-The nPA Smart Card Library has the following dependencies:
-
-- OpenPACE_
-- OpenSC_
-- OpenSSL_
 
 
 ====================================
@@ -158,6 +158,7 @@ the bytes. Example APDUs can be found in :file:`apdus`.
 
 .. program-output:: npa-tool --help
 
+
 ======================
 Linking against libnpa
 ======================
@@ -180,6 +181,59 @@ Alternatively you can specify libraries and flags by hand::
         -L$PREFIX/lib -lnpa -lopensc -lcrypto"
 
 
+********************************************************************************
+Using the German identity card with OpenSC
+********************************************************************************
+
+.. versionadded:: 0.6
+    Added external card driver and PKCS#15 emulator for supporting nPA in
+    OpenSC.
+
+To let OpenSC recognize the German ID card we implemented an external card
+driver. We supply a sample :file:`opensc.conf` which adds our driver to all
+components of OpenSC. Load it by setting :envvar:`OPENSC_CONF`::
+
+    export OPENSC_CONF=$VSMARTCARD/npa/opensc.conf
+
+On Windows you need to use :command:`set` instead of :command:`export`. In
+:file:`npa-0.7_win32` do the following::
+
+    cd bin
+    set OPENSC_CONF=..\etc\opensc.conf
+
+The card driver recognizes the PIN verification method by it's ID. MRZ, CAN,
+eID-PIN and PUK are verified using |PACE| (ID ``0x01``, ``0x02``, ``0x03`` and
+``0x04``). The eSign PIN (ID ``0x83``) is verified using a standard ISO-7816-4
+VERIFY command. Here, for example, we show how to verify the eID-PIN "123456"
+with :command:`opensc-explorer`::
+
+    opensc-explorer
+    OpenSC [3F00]> verify CHV3 313233343536
+    Code correct.
+
+When the eID-PIN was verified incorrectly three times, it is blocked and must
+be unblocked with the PUK. But unlike traditional cards the German ID card does
+suspend the eID-PIN after the second try of verification. To unlock the last
+retry, the CAN is required.  Since the suspended state is not captured by
+OpenSC we handle it transparently within the driver. If the eID-PIN shall be
+verified and it is suspended, the card driver will verify the CAN first. If no
+CAN is given in :file:`opensc.conf`, the driver will request it on the standard
+input. You can use |npa-tool| to unblock or resume the eID-PIN.
+
+The German ID card is capable of creating a qualified electronic signature.
+Therefor, the card must be initialized by a trust center with the user's
+consent. Today this means, that the user need to register for `sign-me`_. The
+process also initializes the QES-PIN, which unlocks the signature key. An
+intializesed card can be used for electronic signature, with a Comfort Reader
+(KAT-K) [#footnote1]_ that authenticates as signature terminal to the card.
+Below, you can see two examples how to create a signature::
+
+    # SHA256_FILE is set to a file of 32 bytes length
+    # QES PIN will be prompted by the reader
+    pkcs15-crypt --sign --sha-256 --input $SHA256_FILE
+    pkcs11-tool --module opensc-pkcs11.so --sign --input-file $SHA256_FILE
+
+
 .. include:: questions.txt
 
 
@@ -189,6 +243,10 @@ Notes and References
 
 .. target-notes::
 
-.. _OpenPACE: https://frankmorgner.github.io/vsmartcard/
+.. _OpenPACE: https://frankmorgner.github.io/openpace/
 .. _OpenSC: https://github.com/OpenSC/OpenSC
 .. _OpenSSL: http://www.openssl.org
+.. _sign-me: https://www.bundesdruckerei.de/en/798-sign-me
+.. _BSI TR-03119: https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TR03119/BSI-TR-03119_V1_pdf.pdf
+.. _Reiner SCT cyberJack RFID komfort: http://www.reiner-sct.com/produkte/chipkartenleser/cyberJack_RFID_komfort.html
+.. [#footnote1] A Comfort Reader is defined by `BSI TR-03119`_. Today the `Reiner SCT cyberJack RFID komfort`_ is the only reader that supports this configuration.

@@ -17,15 +17,78 @@
 # virtualsmartcard.  If not, see <http://www.gnu.org/licenses/>.
 
 from virtualsmartcard.SmartcardSAM import SAM
+from virtualsmartcard.VirtualSmartcard import Iso7816OS
 from virtualsmartcard.SEutils import ControlReferenceTemplate, Security_Environment
 from virtualsmartcard.SWutils import SwError, SW
-from virtualsmartcard.ConstantDefinitions import CRT_TEMPLATE, SM_Class, ALGO_MAPPING
-from virtualsmartcard.TLVutils import unpack, bertlv_pack
+from virtualsmartcard.ConstantDefinitions import CRT_TEMPLATE, SM_Class, ALGO_MAPPING, MAX_EXTENDED_LE, MAX_SHORT_LE
+from virtualsmartcard.TLVutils import unpack, bertlv_pack, decodeDiscretionaryDataObjects, tlv_find_tag
 from virtualsmartcard.SmartcardFilesystem import make_property
-from virtualsmartcard.utils import inttostring
+from virtualsmartcard.utils import inttostring, R_APDU
 import virtualsmartcard.CryptoUtils as vsCrypto
 from chat import CHAT, CVC, PACE_SEC, EAC_CTX
-import pace
+import eac
+import logging, binascii
+
+
+class NPAOS(Iso7816OS):
+    def __init__(self, mf, sam, ins2handler=None, maxle=MAX_EXTENDED_LE, ef_cardsecurity=None, ef_cardaccess=None, ca_key=None, cvca=None, disable_checks=False, esign_key=None, esign_ca_cert=None, esign_cert=None):
+        Iso7816OS.__init__(self, mf, sam, ins2handler, maxle)
+        self.ins2handler[0x86] = self.SAM.general_authenticate
+        self.ins2handler[0x2c] = self.SAM.reset_retry_counter
+
+        # different ATR (Answer To Reset) values depending on used Chip version
+        # It's just a playground, because in past one of all those eID clients did not recognize the card correctly with newest ATR values
+        self.atr = '\x3B\x8A\x80\x01\x80\x31\xF8\x73\xF7\x41\xE0\x82\x90\x00\x75'
+        #self.atr = '\x3B\x8A\x80\x01\x80\x31\xB8\x73\x84\x01\xE0\x82\x90\x00\x06'
+        #self.atr = '\x3B\x88\x80\x01\x00\x00\x00\x00\x00\x00\x00\x00\x09'
+        #self.atr = '\x3B\x87\x80\x01\x80\x31\xB8\x73\x84\x01\xE0\x19'
+
+        self.SAM.current_SE.disable_checks = disable_checks
+        if ef_cardsecurity:
+            ef = self.mf.select('fid', 0x011d)
+            ef.data = ef_cardsecurity
+        if ef_cardaccess:
+            ef = self.mf.select('fid', 0x011c)
+            ef.data = ef_cardaccess
+        if cvca:
+            self.SAM.current_SE.cvca = cvca
+        if ca_key:
+            self.SAM.current_SE.ca_key = ca_key
+        esign = self.mf.select('dfname', '\xA0\x00\x00\x01\x67\x45\x53\x49\x47\x4E')
+        if esign_ca_cert:
+            ef = esign.select('fid', 0xC000)
+            ef.data = esign_ca_cert
+        if esign_cert:
+            ef = esign.select('fid', 0xC001)
+            ef.data = esign_cert
+
+
+    def formatResult(self, seekable, le, data, sw, sm):
+        if seekable:
+            # when le = 0 then we want to have 0x9000. here we only have the
+            # effective le, which is either MAX_EXTENDED_LE or MAX_SHORT_LE,
+            # depending on the APDU. Note that the following distinguisher has
+            # one false positive
+            if le > len(data) and le != MAX_EXTENDED_LE and le != MAX_SHORT_LE:
+                sw = SW["WARN_EOFBEFORENEREAD"]
+
+        if le != None:
+            result = data[:le]
+        else:
+            result = data[:0]
+        if sm:
+            try:
+                sw, result = self.SAM.protect_result(sw, result)
+            except SwError as e:
+                logging.info(e.message)
+                import traceback, sys
+                traceback.print_exception(*sys.exc_info())
+                sw = e.sw
+                result = ""
+                answer = self.formatResult(False, 0, result, sw, False)
+
+        return R_APDU(result, inttostring(sw)).render()
+
 
 class nPA_AT_CRT(ControlReferenceTemplate):
 
@@ -37,6 +100,9 @@ class nPA_AT_CRT(ControlReferenceTemplate):
     def __init__(self):
         ControlReferenceTemplate.__init__(self, CRT_TEMPLATE["AT"])
         self.chat = None
+        DateOfBirth = None
+        DateOfExpiry = None
+        CommunityID = None
 
     def keyref_is_mrz(self):
         if self.keyref_secret_key == '%c'% self.PACE_MRZ:
@@ -68,9 +134,26 @@ class nPA_AT_CRT(ControlReferenceTemplate):
                 tag, length, value = tlv
                 if tag == 0x7f4c:
                     self.chat = CHAT(bertlv_pack([[tag, length, value]]))
-                    print(self.chat)
                 elif tag == 0x67:
                     self.auxiliary_data = bertlv_pack([[tag, length, value]])
+                    # extract reference values for verifying
+                    # DateOfBirth, DateOfExpiry and CommunityID
+                    for ddo in decodeDiscretionaryDataObjects(value):
+                        try:
+                            oidvalue = ddo[0][2]
+                            reference = ddo[1][2]
+                            mapped_algo = ALGO_MAPPING[oidvalue]
+                            if mapped_algo == "DateOfBirth":
+                                self.DateOfBirth = int(reference)
+                                logging.info("Found reference DateOfBirth: " + str(self.DateOfBirth))
+                            elif mapped_algo == "DateOfExpiry":
+                                self.DateOfExpiry = int(reference)
+                                logging.info("Found reference DateOfExpiry: " + str(self.DateOfExpiry))
+                            elif mapped_algo == "CommunityID":
+                                self.CommunityID = binascii.hexlify(reference)
+                                logging.info("Found reference CommunityID: " + str(self.CommunityID))
+                        except:
+                            pass
                 elif tag == 0x80 or tag == 0x84 or tag == 0x83 or tag == 0x91:
                     # handled by ControlReferenceTemplate.parse_SE_config
                     pass
@@ -78,6 +161,7 @@ class nPA_AT_CRT(ControlReferenceTemplate):
                     raise SwError(SW["ERR_REFNOTUSABLE"])
 
         return r, ""
+
 
 class nPA_SE(Security_Environment):
 
@@ -133,7 +217,7 @@ class nPA_SE(Security_Environment):
         elif self.eac_step == 5 and self.at.algorithm == "CA":
             return self.__eac_ca(data)
         elif self.eac_step == 6:
-            # TODO implement RI
+            # TODO implement RI  "\x7c\x22\x81\x20\" is some prefix and the rest is our RI
             return SW["NORMAL"], "\x7c\x22\x81\x20\x48\x1e\x58\xd1\x7c\x12\x9a\x0a\xb4\x63\x7d\x43\xc7\xf7\xeb\x2b\x06\x10\x6f\x26\x90\xe3\x00\xc4\xe7\x03\x54\xa0\x41\xf0\xd3\x90"
 
         raise SwError(SW["ERR_INCORRECTPARAMETERS"])
@@ -161,9 +245,9 @@ class nPA_SE(Security_Environment):
             raise SwError(SW["WARN_NOINFO63"])
 
         if self.at.keyref_is_mrz():
-            self.PACE_SEC = PACE_SEC(self.sam.mrz, pace.PACE_MRZ)
+            self.PACE_SEC = PACE_SEC(self.sam.mrz, eac.PACE_MRZ)
         elif self.at.keyref_is_can():
-            self.PACE_SEC = PACE_SEC(self.sam.can, pace.PACE_CAN)
+            self.PACE_SEC = PACE_SEC(self.sam.can, eac.PACE_CAN)
         elif self.at.keyref_is_pin():
             if self.sam.counter <= 0:
                 print "Must use PUK to unblock"
@@ -171,41 +255,41 @@ class nPA_SE(Security_Environment):
             if self.sam.counter == 1 and not self.sam.active:
                 print "Must use CAN to activate"
                 return 0x63c1, ""
-            self.PACE_SEC = PACE_SEC(self.sam.PIN, pace.PACE_PIN)
+            self.PACE_SEC = PACE_SEC(self.sam.eid_pin, eac.PACE_PIN)
             self.sam.counter -= 1
             if self.sam.counter <= 1:
                 self.sam.active = False
         elif self.at.keyref_is_puk():
             if self.sam.counter_puk <= 0:
                 raise SwError(SW["WARN_NOINFO63"])
-            self.PACE_SEC = PACE_SEC(self.sam.puk, pace.PACE_PUK)
+            self.PACE_SEC = PACE_SEC(self.sam.puk, eac.PACE_PUK)
             self.sam.counter_puk -= 1
         else:
             raise SwError(SW["ERR_INCORRECTPARAMETERS"])
         self.sec = self.PACE_SEC.sec
 
         if not self.eac_ctx:
-            pace.EAC_init()
+            eac.EAC_init()
 
             self.EAC_CTX = EAC_CTX()
             self.eac_ctx = self.EAC_CTX.ctx
-            pace.CA_disable_passive_authentication(self.eac_ctx)
+            eac.CA_disable_passive_authentication(self.eac_ctx)
 
             ef_card_security = self.mf.select('fid', 0x011d)
             ef_card_security_data = ef_card_security.data
-            pace.EAC_CTX_init_ef_cardsecurity(ef_card_security_data, self.eac_ctx)
+            eac.EAC_CTX_init_ef_cardsecurity(ef_card_security_data, self.eac_ctx)
 
             if self.ca_key:
-                ca_pubkey = pace.CA_get_pubkey(self.eac_ctx, ef_card_security_data)
-                if 1 != pace.CA_set_key(self.eac_ctx, self.ca_key, ca_pubkey):
-                    pace.print_ossl_err()
+                ca_pubkey = eac.CA_get_pubkey(self.eac_ctx, ef_card_security_data)
+                if 1 != eac.CA_set_key(self.eac_ctx, self.ca_key, ca_pubkey):
+                    eac.print_ossl_err()
                     raise SwError(SW["WARN_NOINFO63"])
             else:
                 # we don't have a good CA key, so we simply generate an ephemeral one
-                comp_pubkey = pace.TA_STEP3_generate_ephemeral_key(self.eac_ctx)
-                pubkey = pace.CA_STEP2_get_eph_pubkey(self.eac_ctx)
+                comp_pubkey = eac.TA_STEP3_generate_ephemeral_key(self.eac_ctx)
+                pubkey = eac.CA_STEP2_get_eph_pubkey(self.eac_ctx)
                 if not comp_pubkey or not pubkey:
-                    pace.print_ossl_err()
+                    eac.print_ossl_err()
                     raise SwError(SW["WARN_NOINFO63"])
 
                 # save public key in EF.CardSecurity (and invalidate the signature)
@@ -216,9 +300,9 @@ class nPA_SE(Security_Environment):
                 ef_card_security_data = ef_card_security_data[:61+4+239+2+1] + pubkey + ef_card_security_data[61+4+239+2+1+len(pubkey):]
                 ef_card_security.data = ef_card_security_data
 
-        nonce = pace.PACE_STEP1_enc_nonce(self.eac_ctx, self.sec)
+        nonce = eac.PACE_STEP1_enc_nonce(self.eac_ctx, self.sec)
         if not nonce:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["WARN_NOINFO63"])
 
         resp = nPA_SE.__pack_general_authenticate([[0x80, len(nonce), nonce]])
@@ -230,14 +314,14 @@ class nPA_SE(Security_Environment):
     def __eac_pace_step2(self, data):
         tlv_data = nPA_SE.__unpack_general_authenticate(data)
 
-        pubkey = pace.PACE_STEP3A_generate_mapping_data(self.eac_ctx)
+        pubkey = eac.PACE_STEP3A_generate_mapping_data(self.eac_ctx)
         if not pubkey:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["WARN_NOINFO63"])
 
         for tag, length, value in tlv_data:
             if tag == 0x81:
-                pace.PACE_STEP3A_map_generator(self.eac_ctx, value)
+                eac.PACE_STEP3A_map_generator(self.eac_ctx, value)
             else:
                 raise SwError(SW["ERR_INCORRECTPARAMETERS"])
 
@@ -248,16 +332,16 @@ class nPA_SE(Security_Environment):
     def __eac_pace_step3(self, data):
         tlv_data = nPA_SE.__unpack_general_authenticate(data)
 
-        self.my_pace_eph_pubkey = pace.PACE_STEP3B_generate_ephemeral_key(self.eac_ctx)
+        self.my_pace_eph_pubkey = eac.PACE_STEP3B_generate_ephemeral_key(self.eac_ctx)
         if not self.my_pace_eph_pubkey:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["WARN_NOINFO63"])
         eph_pubkey = self.my_pace_eph_pubkey
 
         for tag, length, value in tlv_data:
             if tag == 0x83:
                 self.pace_opp_pub_key = value
-                pace.PACE_STEP3B_compute_shared_secret(self.eac_ctx, self.pace_opp_pub_key)
+                eac.PACE_STEP3B_compute_shared_secret(self.eac_ctx, self.pace_opp_pub_key)
             else:
                 raise SwError(SW["ERR_INCORRECTPARAMETERS"])
 
@@ -267,8 +351,8 @@ class nPA_SE(Security_Environment):
 
     def __eac_pace_step4(self, data):
         tlv_data = nPA_SE.__unpack_general_authenticate(data)
-        pace.PACE_STEP3C_derive_keys(self.eac_ctx)
-        my_token = pace.PACE_STEP3D_compute_authentication_token(self.eac_ctx, self.pace_opp_pub_key)
+        eac.PACE_STEP3C_derive_keys(self.eac_ctx)
+        my_token = eac.PACE_STEP3D_compute_authentication_token(self.eac_ctx, self.pace_opp_pub_key)
         token = ""
         for tag, length, value in tlv_data:
             if tag == 0x85:
@@ -276,8 +360,8 @@ class nPA_SE(Security_Environment):
             else:
                 raise SwError(SW["ERR_INCORRECTPARAMETERS"])
 
-        if not my_token or 1 != pace.PACE_STEP3D_verify_authentication_token(self.eac_ctx, token):
-            pace.print_ossl_err()
+        if not my_token or 1 != eac.PACE_STEP3D_verify_authentication_token(self.eac_ctx, token):
+            eac.print_ossl_err()
             raise SwError(SW["WARN_NOINFO63"])
 
         print "Established PACE channel"
@@ -297,7 +381,7 @@ class nPA_SE(Security_Environment):
         self.eac_step += 1
         self.at.algorithm = "TA"
 
-        self.new_encryption_ctx = pace.EAC_ID_PACE
+        self.new_encryption_ctx = eac.EAC_ID_PACE
 
         result = [[0x86, len(my_token), my_token]]
         if self.at.chat:
@@ -305,9 +389,9 @@ class nPA_SE(Security_Environment):
                 self.car = CVC(self.cvca).get_chr()
             result.append([0x87, len(self.car), self.car])
             if (self.disable_checks):
-                pace.TA_disable_checks(self.eac_ctx)
-            if not pace.EAC_CTX_init_ta(self.eac_ctx, None, self.cvca):
-                pace.print_ossl_err()
+                eac.TA_disable_checks(self.eac_ctx)
+            if not eac.EAC_CTX_init_ta(self.eac_ctx, None, self.cvca):
+                eac.print_ossl_err()
                 raise SwError(SW["WARN_NOINFO63"])
 
 
@@ -323,13 +407,13 @@ class nPA_SE(Security_Environment):
             else:
                 raise SwError(SW["ERR_INCORRECTPARAMETERS"])
 
-        if pace.CA_STEP4_compute_shared_secret(self.eac_ctx, pubkey) != 1:
-            pace.print_ossl_err()
+        if eac.CA_STEP4_compute_shared_secret(self.eac_ctx, pubkey) != 1:
+            eac.print_ossl_err()
             raise SwError(SW["ERR_NOINFO69"]) 
 
-        nonce, token = pace.CA_STEP5_derive_keys(self.eac_ctx, pubkey)
+        nonce, token = eac.CA_STEP5_derive_keys(self.eac_ctx, pubkey)
         if not nonce or not token:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["WARN_NOINFO63"])
 
         self.eac_step += 1
@@ -337,7 +421,7 @@ class nPA_SE(Security_Environment):
         print "Generated Nonce and Authentication Token for CA"
 
         # TODO activate SM
-        self.new_encryption_ctx = pace.EAC_ID_CA
+        self.new_encryption_ctx = eac.EAC_ID_CA
 
         return 0x9000, nPA_SE.__pack_general_authenticate([[0x81,
             len(nonce), nonce], [0x82, len(token), token]])
@@ -347,8 +431,8 @@ class nPA_SE(Security_Environment):
             raise SwError(SW["ERR_INCORRECTPARAMETERS"])
 
         cert = bertlv_pack([[0x7f21, len(data), data]])
-        if 1 != pace.TA_STEP2_import_certificate(self.eac_ctx, cert):
-            pace.print_ossl_err()
+        if 1 != eac.TA_STEP2_import_certificate(self.eac_ctx, cert):
+            eac.print_ossl_err()
             raise SwError(SW["ERR_NOINFO69"]) 
 
         print "Imported Certificate"
@@ -361,7 +445,7 @@ class nPA_SE(Security_Environment):
         encrypted the given challenge or not
         """
         if self.dst.keyref_public_key: # TODO check if this is the correct CAR
-            id_picc = pace.EAC_Comp(self.eac_ctx, pace.EAC_ID_PACE, self.my_pace_eph_pubkey)
+            id_picc = eac.EAC_Comp(self.eac_ctx, eac.EAC_ID_PACE, self.my_pace_eph_pubkey)
 
             # FIXME auxiliary_data might be from an older run of PACE
             if hasattr(self.at, "auxiliary_data"):
@@ -369,9 +453,10 @@ class nPA_SE(Security_Environment):
             else:
                 auxiliary_data = None
 
-            if 1 != pace.TA_STEP6_verify(self.eac_ctx, self.at.iv, id_picc,
+            if 1 != eac.TA_STEP6_verify(self.eac_ctx, self.at.iv, id_picc,
                     auxiliary_data, data):
-                pace.print_ossl_err()
+                eac.print_ossl_err()
+                print "Could not verify Terminal's signature"
                 raise SwError(SW["ERR_CONDITIONNOTSATISFIED"])
 
             print "Terminal's signature verified"
@@ -383,26 +468,26 @@ class nPA_SE(Security_Environment):
         raise SwError(SW["ERR_CONDITIONNOTSATISFIED"])
 
     def compute_cryptographic_checksum(self, p1, p2, data):
-        checksum = pace.EAC_authenticate(self.eac_ctx, data)
+        checksum = eac.EAC_authenticate(self.eac_ctx, data)
         if not checksum:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["ERR_NOINFO69"]) 
 
         return checksum
 
     def encipher(self, p1, p2, data):
         padded = vsCrypto.append_padding(self.cct.blocklength, data)
-        cipher = pace.EAC_encrypt(self.eac_ctx, padded)
+        cipher = eac.EAC_encrypt(self.eac_ctx, padded)
         if not cipher:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["ERR_NOINFO69"]) 
 
         return cipher
 
     def decipher(self, p1, p2, data):
-        plain = pace.EAC_decrypt(self.eac_ctx, data)
+        plain = eac.EAC_decrypt(self.eac_ctx, data)
         if not plain:
-            pace.print_ossl_err()
+            eac.print_ossl_err()
             raise SwError(SW["ERR_NOINFO69"]) 
 
         return plain
@@ -449,13 +534,18 @@ class nPA_SE(Security_Environment):
         
         return sw, return_data
 
+    def compute_digital_signature(self, p1, p2, data):
+        # TODO Signing with brainpoolP256r1 or any other key needs some more effort ;-)
+        return '\x0D\xB2\x9B\xB9\x5E\x97\x7D\x42\x73\xCF\xA5\x45\xB7\xED\x5C\x39\x3F\xCE\xCD\x4A\xDE\xDC\x2B\x85\x23\x9F\x66\x52\x10\xC2\x67\xDC\xA6\x35\x94\x2D\x24\xED\xEB\xC8\x34\x6C\x4B\xD1\xA1\x15\xB4\x48\x3A\xA4\x4A\xCE\xFF\xED\x97\x0E\x07\xF3\x72\xF0\xFB\xA3\x62\x8C'
+
 
 class nPA_SAM(SAM):
 
-    def __init__(self, pin, can, mrz, puk, mf, default_se = nPA_SE):
-        SAM.__init__(self, pin, None, mf)
+    def __init__(self, eid_pin, can, mrz, puk, qes_pin, mf, default_se = nPA_SE):
+        SAM.__init__(self, qes_pin, None, mf)
         self.active = True
         self.current_SE = default_se(self.mf, self)
+        self.eid_pin = eid_pin
         self.can = can
         self.mrz = mrz
         self.puk = puk
@@ -479,8 +569,8 @@ class nPA_SAM(SAM):
                 # TODO allow terminals to change the PIN with permission "CAN allowed"
                 if not self.current_SE.at.keyref_is_pin():
                     raise SwError(SW["ERR_CONDITIONNOTSATISFIED"]) 
-                self.PIN = data
-                print "Changed PIN to %r" % self.PIN
+                self.eid_pin = data
+                print "Changed PIN to %r" % self.eid_pin
             else:
                 raise SwError(SW["ERR_DATANOTFOUND"])
         elif p1 == 0x03:
@@ -518,9 +608,9 @@ class nPA_SAM(SAM):
             if (p1 != 0x00 or p2 != 0x00):
                 raise SwError(SW["ERR_INCORRECTP1P2"])
         
-            self.last_challenge = pace.TA_STEP4_get_nonce(self.current_SE.eac_ctx)
+            self.last_challenge = eac.TA_STEP4_get_nonce(self.current_SE.eac_ctx)
             if not self.last_challenge:
-                pace.print_ossl_err()
+                eac.print_ossl_err()
                 raise SwError(SW["ERR_NOINFO69"])
         else:
             SAM.get_challenge(self, p1, p2, data)
@@ -528,43 +618,75 @@ class nPA_SAM(SAM):
         return SW["NORMAL"], self.last_challenge
 
     def verify(self, p1, p2, data):
-        if (p1 != 0x80 or p2 != 0x00):
-            raise SwError(SW["ERR_INCORRECTP1P2"])
+        if p1 == 0x80 and p2 == 0x00:
+            if self.current_SE.eac_step == 6:
+                # data should only contain exactly OID
+                [(tag, _, value)] = structure = unpack(data)
+                if tag == 6:
+                    mapped_algo = ALGO_MAPPING[value]
+                    eid = self.mf.select('dfname', '\xe8\x07\x04\x00\x7f\x00\x07\x03\x02')
+                    if mapped_algo == "DateOfExpiry":
+                        [(_, _, [(_, _, mine)])] = unpack(eid.select('fid', 0x0103).data)
+                        logging.info("DateOfExpiry: " + str(mine)
+                                + "; reference: " + str(self.current_SE.at.DateOfExpiry))
+                        if self.current_SE.at.DateOfExpiry < mine:
+                            print("Date of expiry verified")
+                            return SW["NORMAL"], ""
+                        else:
+                            print("Date of expiry not verified (expired)")
+                            return SW["WARN_NOINFO63"], ""
+                    elif mapped_algo == "DateOfBirth":
+                        [(_, _, [(_, _, mine)])] = unpack(eid.select('fid', 0x0108).data)
+                        # case1: YYYYMMDD -> good
+                        # case2: YYYYMM   -> mapped to last day of given month, i.e. YYYYMM31 ;-)
+                        # case3: YYYY     -> mapped to YYYY-12-31
+                        if len(str(mine)) == 6:
+                            mine = int(str(mine) + "31")
+                        elif len(str(mine)) == 4:
+                            mine = int(str(mine) + "1231")
+                        logging.info("DateOfBirth: " + str(mine)
+                                + "; reference: " + str(self.current_SE.at.DateOfExpiry))
+                        if self.current_SE.at.DateOfBirth < mine:
+                            print("Date of birth verified (old enough)")
+                            return SW["NORMAL"], ""
+                        else:
+                            print("Date of birth not verified (too young)")
+                            return SW["WARN_NOINFO63"], ""
+                    elif mapped_algo == "CommunityID":
+                        [(_, _, [(_, _, mine)])] = unpack(eid.select('fid', 0x0112).data)
+                        mine = binascii.hexlify(mine)
+                        logging.info("CommunityID: " + str(mine)
+                                + "; reference: " + str(self.current_SE.at.CommunityID))
+                        if mine.startswith(self.current_SE.at.CommunityID):
+                            print("Community ID verified (living there)")
+                            return SW["NORMAL"], ""
+                        else:
+                            print("Community ID not verified (not living there)")
+                            return SW["WARN_NOINFO63"], ""
+                    else:
+                        return SwError(SW["ERR_DATANOTFOUND"])
+                else:
+                    return SwError(SW["ERR_DATANOTFOUND"])
 
-        if self.current_SE.eac_step == 6:
-            structure = unpack(data)
-            for tag, length, value in structure:
-                if tag == 6 and ALGO_MAPPING[value] == "DateOfExpiry":
-                    # hell yes, this is a valid nPA
-                    # TODO actually check it...
-                    return SW["NORMAL"], ""
-                if tag == 6 and ALGO_MAPPING[value] == "DateOfBirth":
-                    # hell yes, we are old enough
-                    # TODO actually check it...
-                    return SW["NORMAL"], ""
-                if tag == 6 and ALGO_MAPPING[value] == "CommunityID":
-                    # well OK, we are living there
-                    # TODO actually check it...
-                    return SW["NORMAL"], ""
-
-        raise SwError(SW["WARN_NOINFO63"])
+        else:
+            return SAM.verify(self, p1, p2, data)
 
     def parse_SM_CAPDU(self, CAPDU, header_authentication):
         if hasattr(self.current_SE, "new_encryption_ctx"):
-            if self.current_SE.new_encryption_ctx == pace.EAC_ID_PACE:
+            if self.current_SE.new_encryption_ctx == eac.EAC_ID_PACE:
                 protocol = "PACE"
             else:
                 protocol = "CA"
-            print "switching to new encryption context established in %s:" % protocol
-            print pace.EAC_CTX_print_private(self.current_SE.eac_ctx, 4)
+            logging.info("switching to new encryption context established in %s:" % protocol)
+            logging.info(eac.EAC_CTX_print_private(self.current_SE.eac_ctx, 4))
 
-            pace.EAC_CTX_set_encryption_ctx(self.current_SE.eac_ctx, self.current_SE.new_encryption_ctx)
+            eac.EAC_CTX_set_encryption_ctx(self.current_SE.eac_ctx, self.current_SE.new_encryption_ctx)
 
             delattr(self.current_SE, "new_encryption_ctx")
 
-        pace.EAC_increment_ssc(self.current_SE.eac_ctx)
+        eac.EAC_increment_ssc(self.current_SE.eac_ctx)
         return SAM.parse_SM_CAPDU(self, CAPDU, 1)
 
     def protect_result(self, sw, unprotected_result):
-        pace.EAC_increment_ssc(self.current_SE.eac_ctx)
+        eac.EAC_increment_ssc(self.current_SE.eac_ctx)
         return SAM.protect_result(self, sw, unprotected_result)
